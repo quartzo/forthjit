@@ -371,8 +371,16 @@ Native code can raise too: `icall &forth_raise` after `sig V W`.
 
 ## Implementation notes
 
-- `forth.c` keeps the data stack, return stack, a dedicated compile-time
-  control-flow stack, the threaded `code[]` array, and the dictionary.
+- All interpreter state lives in a `struct forth` (stacks, the threaded
+  `code[]` array, the data space, the dictionary, the compile log, the
+  error/CATCH frames and the JIT/assembler state). It is created in `main` and
+  passed explicitly as a parameter (`struct forth *F`) to every function that
+  touches it — there is no global interpreter state.
+- Generated native code does not take the context as an argument; it embeds
+  the addresses of the context fields (`&F->dstack`, `&F->mem`, …) at compile
+  time. The `forth_*` helpers that native code calls through `icall` take the
+  context as their **last** argument, so the Forth-ABI operands keep the
+  leading registers; the IR appends the context automatically.
 - Internal runtime words are named `(exit)`, `(lit)`, `(branch)`,
   `(0branch)`, `(do)`, `(loop)`, `(+loop)`. They are the primitive targets
   emitted by the compiler and can technically be called directly.
