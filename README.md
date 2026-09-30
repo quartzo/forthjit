@@ -1,15 +1,56 @@
 # tiny-forth
 
-A small, self-contained Forth interpreter written in C. It uses classic
-**indirect threaded code**: a colon definition compiles to a flat array of
-*execution tokens* (XTs), and one virtual-machine loop walks that array,
-threading calls through the return stack. No C recursion is used for nested
-colon calls.
+A small, self-contained Forth for Linux/gcc: an indirect-threaded kernel with
+a native code generator (vendored SLJIT) and a runtime general enough to host
+other languages.
 
-The whole system is a single file, `forth.c`, built with gcc on Linux.
+- **Indirect threaded code** — a colon definition compiles to a flat array of
+  execution tokens (XTs); one VM loop walks it, threading calls through the
+  return stack. No C recursion is used for nested colon calls.
+- **Native words** — `CODE ... ;CODE` assembles machine code at compile time
+  through SLJIT, in a small low-level IR; colon words can be JIT-compiled.
+- **Self-hosted prelude** — stack, arithmetic, logic, strings, memory, the
+  compiler kit and control flow are written in `prelude.fs` and embedded
+  (DEFLATE-compressed) at build time. The C kernel keeps the parser, the
+  dictionary, the `CODE` assembler and the dynamic linker.
+- **Dynamic runtime** — the dictionary, code space, data space and stacks all
+  grow on demand; a stable-address arena backs `ALLOC`. No fixed-size tables.
+  Runtime dependencies: libc and `-ldl` only.
+- **Libraries** — `INCLUDE` / `REQUIRE`. The bytecode VM (`lib/vm.fs`, with
+  `call/cc` and coroutines) and a minimal Scheme (`lib/scheme.fs`) are loaded
+  on demand, not baked into the core.
 
-> **Full manual:** see [`docs/manual.md`](docs/manual.md) for a complete guide
-> to the Forth and to the low-level IR used by `CODE` definitions.
+```forth
+: fib ( n -- f )  0 1 ROT 0 ?DO OVER + SWAP LOOP DROP ;
+10 fib . CR   \ 55
+```
+
+> **Full manual:** [`docs/manual.md`](docs/manual.md) — the complete guide to
+> the Forth and to the low-level IR used by `CODE` definitions.
+
+## Contents
+
+- [Build and run](#build-and-run)
+- [Project layout](#project-layout)
+- [Syntax basics](#syntax-basics)
+- [The data stack](#the-data-stack)
+- [Arithmetic and logic](#arithmetic-and-logic)
+- [Floating point](#floating-point)
+- [Comparison](#comparison)
+- [Output](#output)
+- [Strings and byte memory](#strings-and-byte-memory)
+- [Defining words: `:` and `;`](#defining-words--and-)
+- [Control flow](#control-flow)
+- [Memory, variables and constants](#memory-variables-and-constants)
+- [Error handling and exceptions](#error-handling-and-exceptions)
+- [Implementation notes](#implementation-notes)
+- [Native code: the SLJIT LIR assembler](#native-code-the-sljit-lir-assembler)
+- [JIT (call-threaded)](#jit-call-threaded)
+- [Bytecode VM skeleton](#bytecode-vm-skeleton)
+- [Minimal Scheme (`lib/scheme.fs`)](#minimal-scheme-libschemerfs)
+- [Tooling](#tooling)
+- [Coverage: what a Forth is expected to have](#coverage-what-a-forth-is-expected-to-have)
+
 
 ## Build and run
 
@@ -33,6 +74,9 @@ forth [--require FILE]... [--repl WORD] [FILE]
   its entry point is entirely up to the caller; the core knows no language.
 - a bare `FILE` is run first, like `./forth FILE`.
 
+The Scheme REPL ships with a launcher: `./bin/scheme`, equivalent to
+`./forth --require scheme.fs --repl SCHEME`.
+
 SLJIT is vendored under `third_party/sljit_src` and pinned in
 `third_party/sljit_VERSION`; the build compiles only `sljitLir.c`.
 
@@ -49,6 +93,20 @@ process.
 > 1 2 + . CR
 3
 ```
+
+## Project layout
+
+| Path | Contents |
+|------|----------|
+| `forth.c` | C kernel: parser, dictionary, VM primitives, `CODE`/IR assembler, JIT, dynamic linker |
+| `prelude.fs` | native prelude: stack, arithmetic, strings, memory, compiler kit, control flow |
+| `lib/vm.fs` | generic bytecode VM: explicit state, `EXECUTE` dispatch, `call/cc`, coroutines |
+| `lib/scheme.fs` | minimal Scheme on the runtime, with a `SCHEME` REPL |
+| `bin/scheme` | launcher for the Scheme REPL |
+| `tools/mkprelude.c` | build tool: compresses `prelude.fs` into `prelude_blob.h` |
+| `test*.fs` | test scripts (`make test`) |
+| `third_party/` | vendored SLJIT and tinf, with their licenses |
+| `docs/manual.md` | the manual |
 
 ## Syntax basics
 
@@ -889,14 +947,15 @@ Legend: **Yes** = implemented, **Partial** = limited/subset, **No** = absent.
 | Capability                              | Status  | Notes |
 |-----------------------------------------|---------|-------|
 | Data stack manipulation (DUP DROP SWAP OVER ROT NIP TUCK ?DUP DEPTH) | Yes | |
-| `PICK`, `ROLL`                          | No      | not implemented |
+| `PICK`                                 | Yes     | `ROLL` not implemented |
 | Return-stack words `>R R> R@ 2>R 2R>`   | Yes     | shared with the VM return stack |
 | Arithmetic (+ - * / MOD NEGATE ABS 1+ 1-) | Yes   | |
 | `*/`, `*/MOD`, `FM/MOD`, `SM/REM`       | No      | |
 | Comparison (`= <> < > <= >= 0= 0< 0>`)  | Yes     | |
 | Bitwise (`AND OR XOR INVERT LSHIFT RSHIFT`) | Yes | |
 | Number bases (`BASE`, `HEX`, `DECIMAL`) | Partial | only literal prefixes `$`, `0x`, `%`, `#`; no `BASE` variable |
-| Double-cell and floating-point words    | No      | single-cell integers only |
+| Floating point (`S>F F>S F+ F- F* F/ F< F.` …) | Yes | doubles stored as tagged cells |
+| Double-cell integers (`2@ 2! M*/` …)   | No      | |
 
 ### Defining and compiling
 
@@ -947,17 +1006,17 @@ Legend: **Yes** = implemented, **Partial** = limited/subset, **No** = absent.
 |-----------------------------------------|---------|-------|
 | `.` `.S` `EMIT` `CR`                    | Yes     | |
 | `TYPE`, `SPACE`, `SPACES`, `."`        | Yes     | |
-| `KEY`, `ACCEPT`, `WORD`, `FIND`         | No      | input is line-based only |
+| `KEY`, `ACCEPT`, `WORD`                 | No      | input is line-based; `READ-LINE` reads a line |
 | String words `S"`, `MOVE`, `FILL`, `COMPARE`, `SEARCH`, `-TRAILING`, `/STRING`, `>NUMBER`, `CMOVE` | Yes | `S"` works in interpret and compile state |
 | `CHAR`, `[CHAR]`                        | Yes     | |
-| File and block I/O                      | No      | |
+| File loading (`INCLUDE`, `REQUIRE`)     | Yes     | Forth source files; no block I/O |
 
 ### Error handling
 
 | Capability                              | Status  | Notes |
 |-----------------------------------------|---------|-------|
 | Automatic abort + stack reset on error  | Yes     | via `setjmp`/`longjmp` |
-| `ABORT`, `ABORT"` as callable words     | No      | behavior exists, no user word |
+| `ABORT`, `ABORT"` as callable words     | Yes     | throws `-1` / `-2` |
 | `CATCH` / `THROW` / `ABORT` / `ABORT"`  | Yes     | ANS exceptions; every internal error is catchable |
 | `ERROR-CODE` / `ERROR-MSG`              | Yes     | code + message side channel |
 
