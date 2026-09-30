@@ -24,8 +24,9 @@ make asan       # build with AddressSanitizer + UBSan
 SLJIT is vendored under `third_party/sljit_src` and pinned in
 `third_party/sljit_VERSION`; the build compiles only `sljitLir.c`.
 
-A native prelude (`prelude.fs`) is zlib-compressed at build time into
-`prelude_blob.h` and loaded at startup. Set `FORTH_NO_PRELUDE=1` to skip it.
+A native prelude (`prelude.fs`) is DEFLATE-compressed at build time into
+`prelude_blob.h` and loaded at startup by the bundled `tinf` decoder (no
+runtime zlib dependency). Set `FORTH_NO_PRELUDE=1` to skip it.
 
 Inside the REPL, tokens are read one line at a time and evaluated. Every line
 is evaluated under an `ABORT` guard: an error aborts the current line, resets
@@ -844,7 +845,7 @@ Legend: **Yes** = implemented, **Partial** = limited/subset, **No** = absent.
 | Capability                              | Status  | Notes |
 |-----------------------------------------|---------|-------|
 | `CODE ... ;CODE` native words        | Yes     | Forth calling convention, `locals`, labels |
-| Native prelude (`prelude.fs`, zlib)    | Yes     | `DUP DROP SWAP OVER NIP TUCK ROT 2DUP 2DROP + - *`; C versions removed |
+| Native prelude (`prelude.fs`, DEFLATE)  | Yes     | `DUP DROP SWAP OVER NIP TUCK ROT 2DUP 2DROP + - *`; C versions removed |
 | Native-to-native calls (`callw`)        | Yes     | scratch-arg ABI; defined words only, no forward refs |
 | LIR: mov/arith/shifts/clz/ctz/rev       | Yes     | integer subset; `32`-suffix variants |
 | Memory operands `[reg±off]`, `[r1+r2<<s]` | Yes   | |

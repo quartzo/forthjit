@@ -3,10 +3,13 @@
  *
  * usage: mkprelude <input.jit> <output.h>
  *
- * Produces prelude_z[] (zlib stream), prelude_z_len and prelude_raw_len.
+ * Produces prelude_z[] (raw DEFLATE stream, RFC 1951), prelude_z_len and
+ * prelude_raw_len.  Raw DEFLATE (windowBits -15) keeps the runtime decoder
+ * tiny: forth.c embeds tinf, not zlib.
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <zlib.h>
 
 int main(int argc, char **argv) {
@@ -27,12 +30,25 @@ int main(int argc, char **argv) {
     if (fread(in, 1, (size_t)n, f) != (size_t)n) { fputs("read error\n", stderr); fclose(f); return 1; }
     fclose(f);
 
-    uLongf clen = compressBound((uLong)n);
+    uLongf clen = compressBound((uLong)n) + 64;
     unsigned char *cbuf = malloc(clen);
     if (!cbuf) { fputs("out of memory\n", stderr); free(in); return 1; }
-    if (compress2(cbuf, &clen, in, (uLong)n, Z_BEST_COMPRESSION) != Z_OK) {
+
+    z_stream zs;
+    memset(&zs, 0, sizeof zs);
+    if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, -15, 9,
+                     Z_DEFAULT_STRATEGY) != Z_OK) {
+        fputs("deflateInit2 failed\n", stderr); free(in); free(cbuf); return 1;
+    }
+    zs.next_in = in;
+    zs.avail_in = (uInt)n;
+    zs.next_out = cbuf;
+    zs.avail_out = (uInt)clen;
+    if (deflate(&zs, Z_FINISH) != Z_STREAM_END) {
         fputs("compression failed\n", stderr); free(in); free(cbuf); return 1;
     }
+    clen = zs.total_out;
+    deflateEnd(&zs);
 
     FILE *o = fopen(argv[2], "wb");
     if (!o) { perror(argv[2]); free(in); free(cbuf); return 1; }

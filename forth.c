@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <dlfcn.h>
-#include <zlib.h>
+#include "tinf.h"
 
 #include "sljitLir.h"
 #include "prelude_blob.h"
@@ -3123,8 +3123,8 @@ static void run_prelude(void) {
 
     unsigned char *raw = malloc((size_t)prelude_raw_len + 1);
     if (!raw) { fputs("cannot allocate prelude buffer\n", stderr); exit(1); }
-    uLongf out = prelude_raw_len;
-    if (uncompress(raw, &out, prelude_z, prelude_z_len) != Z_OK) {
+    unsigned int out = (unsigned int)prelude_raw_len;
+    if (tinf_uncompress(raw, &out, prelude_z, (unsigned int)prelude_z_len) != TINF_OK) {
         free(raw);
         fputs("cannot decompress prelude\n", stderr);
         exit(1);

@@ -1,16 +1,25 @@
 CC       ?= gcc
-CFLAGS   ?= -std=c11 -O2 -Wall -Wextra
+CFLAGS   ?= -std=c11 -Os -Wall -Wextra
 TARGET    = forth
 
 SLJIT_DIR = third_party/sljit_src
 SLJIT_OBJ = $(SLJIT_DIR)/sljitLir.o
-SLJIT_DEFS = -DSLJIT_DEBUG=0 -DSLJIT_ARGUMENT_CHECKS=1
+SLJIT_DEFS = -DSLJIT_DEBUG=0 -DSLJIT_ARGUMENT_CHECKS=0 -DSLJIT_VERBOSE=0 \
+             -DSLJIT_SINGLE_THREADED=1
+
+TINF_DIR = third_party/tinf
+TINF_OBJ = $(TINF_DIR)/tinflate.o
 
 PRELUDE_SRC = prelude.fs
 PRELUDE_HDR = prelude_blob.h
 MKPRELUDE   = tools/mkprelude
 
-CPPFLAGS += -I$(SLJIT_DIR)
+# Trim dead code and unwind metadata; -s strips the release binary.
+SHRINK   = -ffunction-sections -fdata-sections \
+           -fno-asynchronous-unwind-tables -fno-unwind-tables
+LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
+
+CPPFLAGS += -I$(SLJIT_DIR) -I$(TINF_DIR)
 
 all: $(TARGET)
 
@@ -21,19 +30,23 @@ $(PRELUDE_HDR): $(PRELUDE_SRC) $(MKPRELUDE)
 	./$(MKPRELUDE) $(PRELUDE_SRC) $(PRELUDE_HDR)
 
 $(SLJIT_OBJ): $(SLJIT_DIR)/sljitLir.c
-	$(CC) -O2 -w $(SLJIT_DEFS) -I$(SLJIT_DIR) -c $< -o $@
+	$(CC) -Os -w $(SLJIT_DEFS) -I$(SLJIT_DIR) -c $< -o $@
 
-$(TARGET): forth.c $(SLJIT_OBJ) $(PRELUDE_HDR)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ forth.c $(SLJIT_OBJ) -pthread -ldl -lz
+$(TINF_OBJ): $(TINF_DIR)/tinflate.c $(TINF_DIR)/tinf.h
+	$(CC) -Os -DNDEBUG -w -I$(TINF_DIR) -c $< -o $@
+
+$(TARGET): forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
+	$(CC) $(CFLAGS) $(SHRINK) $(CPPFLAGS) $(LDFLAGS) -o $@ forth.c \
+	      $(SLJIT_OBJ) $(TINF_OBJ) -ldl -Wl,-s
 
 test: $(TARGET)
 	./$(TARGET) test.fs </dev/null
 	./$(TARGET) test-native.fs </dev/null
 
-asan: forth.c $(SLJIT_OBJ) $(PRELUDE_HDR)
-	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c $(SLJIT_OBJ) -pthread -ldl -lz
+asan: forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl
 
 clean:
-	rm -f $(TARGET) $(SLJIT_OBJ) $(MKPRELUDE) $(PRELUDE_HDR)
+	rm -f $(TARGET) $(SLJIT_OBJ) $(TINF_OBJ) $(MKPRELUDE) $(PRELUDE_HDR)
 
 .PHONY: all test asan clean
