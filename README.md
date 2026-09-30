@@ -1056,3 +1056,10 @@ Legend: **Yes** = implemented, **Partial** = limited/subset, **No** = absent.
 | Raw per-arch emission (`asm.*`, `db`..`dq`) | Yes  | x86-64; `ARCH` selects the target |
 | Direct `sljit_emit_call` to a label     | No      | requires a separately compiled function context |
 | Meta-JIT (`&sljit_*` from native code)  | No      | would need `-rdynamic` / explicit export |
+
+## License
+
+BSD-style; see [`LICENSE`](LICENSE). Vendored third-party components keep their
+own licenses: SLJIT (`third_party/sljit_LICENSE`) and tinf
+(`third_party/tinf_LICENSE`).
+
