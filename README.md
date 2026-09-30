@@ -587,18 +587,23 @@ The current prelude provides:
 - loop indices: `I J`
 - misc: `?DUP @ ! PICK DEPTH , ALLOT CELLS +! SP@ SP! RP@ EXIT`
 - output: `EMIT CR SPACE . .S TYPE`
-- strings: `." ..."` (compile-time string output)
+- byte memory / strings: `C@ C! FILL MOVE CMOVE CMOVE> COMPARE SEARCH >NUMBER COUNT /STRING -TRAILING CHAR [CHAR] BLANK PLACE SPACES`
+- compiler: `IF ELSE THEN BEGIN UNTIL AGAIN WHILE REPEAT CASE OF ENDOF ENDCASE [ ] LITERAL VARIABLE CONSTANT`
+- counted loops: `DO ?DO LOOP +LOOP LEAVE` (compile side; `(do)`/`(loop)`/… stay native)
+- code space: `HERE STATE CODE@ CODE! CODE,`
 
 `PICK` is native; `.` and `.S` are plain threaded `:` definitions that use
 `/ MOD EMIT` and a `VARIABLE` buffer (number formatting in Forth, no C).
-`DEPTH`, `,`, `ALLOT` and `I`/`J` read the interpreter state through the
-internal symbols `&dstack`, `&mem`, `&memtop`, `&rp` and `&rstack`, which the
-IR resolves directly. `/`/`MOD` raise on division by zero through
+`DEPTH`, `,`, `ALLOT`, `I`/`J`, the code-space accessors and the compiler kit
+read interpreter state through the internal symbols `&dstack`, `&mem`,
+`&memtop`, `&rp`, `&rstack`, `&code`, `&here` and `&state`, which the IR
+resolves directly. `/`/`MOD` raise on division by zero through
 `icall &forth_divzero`.
 
-Their C versions were removed; the C kernel keeps `EXIT`, the dictionary
-words, the compiler, the `CODE` assembler and the dynamic linker. A prelude
-error aborts startup with a fatal message.
+Their C versions were removed; the C kernel keeps the VM primitives (`(exit)`,
+`(lit)`, `(branch)`, `(do)`, `(loop)`, …), the parser, the dictionary, the
+`CODE` assembler and the dynamic linker. A prelude error aborts startup with a
+fatal message.
 
 Native `CODE` words guard their stack arity: each starts with `require <n>`
 (raises the catchable `-4`, stack underflow, via `&forth_need`) and pushing
@@ -845,7 +850,7 @@ Legend: **Yes** = implemented, **Partial** = limited/subset, **No** = absent.
 | Capability                              | Status  | Notes |
 |-----------------------------------------|---------|-------|
 | `CODE ... ;CODE` native words        | Yes     | Forth calling convention, `locals`, labels |
-| Native prelude (`prelude.fs`, DEFLATE)  | Yes     | `DUP DROP SWAP OVER NIP TUCK ROT 2DUP 2DROP + - *`; C versions removed |
+| Native prelude (`prelude.fs`, DEFLATE)  | Yes     | stack/arith/logic, strings, memory, compiler (`IF`…`CASE`, `DO`…`LEAVE`), code space; C versions removed |
 | Native-to-native calls (`callw`)        | Yes     | scratch-arg ABI; defined words only, no forward refs |
 | LIR: mov/arith/shifts/clz/ctz/rev       | Yes     | integer subset; `32`-suffix variants |
 | Memory operands `[reg±off]`, `[r1+r2<<s]` | Yes   | |

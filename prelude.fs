@@ -425,6 +425,130 @@ CODE ALLOT
   mov R0, S1
 ;CODE
 
+\ ---- code space access (native) ------------------------------------------
+
+CODE CODE@
+  require 1
+  mov R0, [S1-8]
+  mov R1, &code
+  shl R0, R0, #3
+  add R1, R1, R0
+  mov R0, [R1]
+  mov [S1-8], R0
+  mov R0, S1
+;CODE
+
+CODE CODE!
+  require 2
+  mov R0, [S1-8]
+  mov R1, [S1-16]
+  mov R2, &code
+  shl R0, R0, #3
+  add R2, R2, R0
+  mov [R2], R1
+  add S1, S1, #-16
+  mov R0, S1
+;CODE
+
+CODE CODE,
+  require 1
+  mov R0, &here
+  mov R1, [R0]
+  mov R2, &code
+  shl R1, R1, #3
+  add R2, R2, R1
+  mov R1, [S1-8]
+  mov [R2], R1
+  mov R1, [R0]
+  add R1, R1, #1
+  mov [R0], R1
+  add S1, S1, #-8
+  mov R0, S1
+;CODE
+
+CODE HERE
+  require 0
+  room 1
+  mov R0, &here
+  mov R0, [R0]
+  mov [S1], R0
+  add S1, S1, #8
+  mov R0, S1
+;CODE
+
+CODE STATE
+  require 0
+  room 1
+  mov R0, &state
+  mov [S1], R0
+  add S1, S1, #8
+  mov R0, S1
+;CODE
+
+\ ---- compiler kit: control flow and defining words in Forth --------------
+\ (placed early so the whole prelude can use them; the C prims are gone)
+
+: PATCH ( target at -- )  OVER OVER - 1-  SWAP CODE! DROP ;
+
+: IF    ['] (0branch) COMPILE,  HERE  0 CODE, ; IMMEDIATE
+: THEN  HERE SWAP PATCH ; IMMEDIATE
+: ELSE  ['] (branch) COMPILE,  HERE 0 CODE,  SWAP HERE SWAP PATCH ; IMMEDIATE
+
+: BEGIN  HERE ; IMMEDIATE
+: UNTIL  ['] (0branch) COMPILE,  HERE 0 CODE,  PATCH ; IMMEDIATE
+: AGAIN  ['] (branch) COMPILE,  HERE 0 CODE,  PATCH ; IMMEDIATE
+: WHILE  ['] (0branch) COMPILE,  HERE 0 CODE, ; IMMEDIATE
+: REPEAT ['] (branch) COMPILE,  HERE 0 CODE,  ROT SWAP PATCH  HERE SWAP PATCH ; IMMEDIATE
+
+: [  0 STATE ! ; IMMEDIATE
+: ]  1 STATE ! ; IMMEDIATE
+: LITERAL  ['] (lit) COMPILE,  CODE, ; IMMEDIATE
+
+: CONSTANT CREATE , DOES> @ ;
+
+\ ---- CASE (over IF/ELSE/THEN, same data-stack control flow) --------------
+
+: CASE    0 ; IMMEDIATE
+: OF      POSTPONE OVER POSTPONE = POSTPONE IF POSTPONE DROP ; IMMEDIATE
+: ENDOF   POSTPONE ELSE ; IMMEDIATE
+: ENDCASE POSTPONE DROP  BEGIN ?DUP WHILE POSTPONE THEN REPEAT ; IMMEDIATE
+
+\ ---- counted loops (compile side; runtime is native) ---------------------
+\ Bookkeeping lives in two Forth-side stacks so IF/THEN (data stack) do not
+\ collide with LEAVE.  BSTK holds [begin qdo] per loop (qdo = -1 if none);
+\ LSTK holds [-1  leave/exit addrs ...] per loop.
+
+CREATE BSTK 512 ALLOT
+CREATE LSTK 512 ALLOT
+CREATE BP 8 ALLOT
+CREATE LP 8 ALLOT
+CREATE LEND 8 ALLOT
+CREATE LBEG 8 ALLOT
+CREATE LQDO 8 ALLOT
+0 BP !  0 LP !
+
+: BPUSH ( x -- )   BP @ 8 * BSTK + !   BP @ 1+ BP ! ;
+: BPOP  ( -- x )   BP @ 1- BP !   BP @ 8 * BSTK + @ ;
+: LPUSH ( x -- )   LP @ 8 * LSTK + !   LP @ 1+ LP ! ;
+: LPOP  ( -- x )   LP @ 1- LP !   LP @ 8 * LSTK + @ ;
+
+: (CLOSE)   ( endword-xt -- )
+  COMPILE,
+  HERE LEND !  0 CODE,
+  BPOP LQDO !
+  BPOP LBEG !
+  LBEG @  LEND @  PATCH
+  BEGIN LPOP DUP -1 = 0= WHILE
+    LEND @ 1+ SWAP PATCH
+  REPEAT DROP
+  LQDO @ -1 = 0= IF  LEND @ 1+ LQDO @ PATCH  THEN ;
+
+: DO     ['] (do)     COMPILE,  HERE BPUSH  -1 BPUSH  -1 LPUSH ; IMMEDIATE
+: ?DO    ['] (?do)  COMPILE,  HERE 0 CODE,  HERE BPUSH  BPUSH  -1 LPUSH ; IMMEDIATE
+: LEAVE  ['] (leave)  COMPILE,  HERE 0 CODE,  LPUSH ; IMMEDIATE
+: LOOP   ['] (loop)   (CLOSE) ; IMMEDIATE
+: +LOOP  ['] (+loop)  (CLOSE) ; IMMEDIATE
+
 \ ---- division and loop indices -------------------------------------------
 
 CODE /
@@ -788,10 +912,75 @@ CODE TYPE
   mov R0, S1
 ;CODE
 
+\ ---- byte memory and strings ---------------------------------------------
+
+CODE C@
+  require 1
+  mov R0, [S1-8]
+  mov.u8 R0, [R0]
+  mov [S1-8], R0
+  mov R0, S1
+;CODE
+
+CODE C!
+  require 2
+  mov R0, [S1-8]
+  mov R1, [S1-16]
+  mov.u8 [R0], R1
+  add S1, S1, #-16
+  mov R0, S1
+;CODE
+
+: FILL      { a u ch -- }  u 0 ?DO ch a I + C! LOOP ;
+: CMOVE     { src dst u -- }  u 0 ?DO src I + C@ dst I + C! LOOP ;
+: CMOVE>    { src dst u -- }  u 0 ?DO src u I - 1- + C@ dst u I - 1- + C! LOOP ;
+: MOVE      { src dst u -- }
+  src dst < IF  u 0 ?DO src I + C@ dst I + C! LOOP
+            ELSE u 0 ?DO src u I - 1- + C@ dst u I - 1- + C! LOOP THEN ;
+: COMPARE   { a1 u1 a2 u2 -- n }
+  BEGIN u1 u2 AND 0> WHILE
+    a1 C@ a2 C@ 2DUP = 0= IF
+      2DUP < IF 2DROP -1 ELSE 2DROP 1 THEN EXIT
+    THEN
+    2DROP
+    a1 1+ TO a1  u1 1- TO u1
+    a2 1+ TO a2  u2 1- TO u2
+  REPEAT
+  u1 u2 < IF -1 ELSE u1 0> IF 1 ELSE 0 THEN THEN ;
+: SEARCH    { a1 u1 a2 u2 -- ca n }
+  u2 0= IF a1 u1 -1 EXIT THEN
+  a1 TO ca  u1 TO n
+  BEGIN n u2 >= WHILE
+    ca u2 a2 u2 COMPARE 0= IF ca n -1 EXIT THEN
+    ca 1+ TO ca  n 1- TO n
+  REPEAT
+  a1 u1 0 ;
+: DIGIT?    { c -- n }  c 48 >= c 57 <= AND IF c 48 - ELSE -1 THEN ;
+: >NUMBER   { lo hi a u -- }
+  BEGIN u 0> WHILE
+    a C@ DIGIT? DUP 0< IF DROP lo hi a u EXIT THEN
+    lo 10 * +  DUP $FFFFFFFF AND
+    SWAP 32 RSHIFT  hi 10 * +
+    TO hi  TO lo
+    a 1+ TO a  u 1- TO u
+  REPEAT
+  lo hi a u ;
+
+: COUNT      ( a -- a+1 u )  DUP 1+ SWAP C@ ;
+: /STRING    ( a u n -- a+n u-n )  DUP >R - SWAP R> + SWAP ;
+: -TRAILING  ( a u -- a u' )
+  BEGIN DUP 0> WHILE 2DUP 1- + C@ 32 = IF 1- ELSE EXIT THEN REPEAT ;
+: CHAR       ( -- c )  PARSE-NAME DROP C@ ;
+: [CHAR]     CHAR ['] (lit) COMPILE, CODE, ; IMMEDIATE
+: BLANK      ( a u -- )  32 FILL ;
+: SPACES     ( n -- )  BEGIN DUP 0> WHILE 32 EMIT 1- REPEAT DROP ;
+: PLACE      { src u dst -- }  u dst C!  src dst 1+ u CMOVE ;
+
 \ ---- number output (threaded Forth) --------------------------------------
 
 8 CONSTANT CELL-SIZE
 : CELLS  CELL-SIZE * ;
+: VARIABLE CREATE 1 CELLS ALLOT ;
 : +!     ( n addr -- ) DUP @ ROT + SWAP ! ;
 
 CODE PICK
@@ -849,29 +1038,6 @@ VARIABLE SCNT
     1 SCNT +!
   REPEAT
   CR ;
-
-\ ---- control flow defined in Forth (over the compiler kit) ---------------
-
-: PATCH ( target at -- )  OVER OVER - 1-  SWAP CODE! DROP ;
-
-: IF    ['] (0branch) COMPILE,  HERE  0 CODE, ; IMMEDIATE
-: THEN  HERE SWAP PATCH ; IMMEDIATE
-: ELSE  ['] (branch) COMPILE,  HERE 0 CODE,  SWAP HERE SWAP PATCH ; IMMEDIATE
-
-: BEGIN  HERE ; IMMEDIATE
-: UNTIL  ['] (0branch) COMPILE,  HERE 0 CODE,  PATCH ; IMMEDIATE
-: AGAIN  ['] (branch) COMPILE,  HERE 0 CODE,  PATCH ; IMMEDIATE
-: WHILE  ['] (0branch) COMPILE,  HERE 0 CODE, ; IMMEDIATE
-: REPEAT ['] (branch) COMPILE,  HERE 0 CODE,  ROT SWAP PATCH  HERE SWAP PATCH ; IMMEDIATE
-
-: [  0 STATE ! ; IMMEDIATE
-: ]  1 STATE ! ; IMMEDIATE
-: LITERAL  ['] (lit) COMPILE,  CODE, ; IMMEDIATE
-
-\ ---- defining words in Forth ---------------------------------------------
-
-: VARIABLE CREATE 1 CELLS ALLOT ;
-: CONSTANT CREATE , DOES> @ ;
 
 \ ---- loop control --------------------------------------------------------
 

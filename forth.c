@@ -53,7 +53,6 @@ typedef long cell;
 #define CODE_SIZE  (1 << 16)
 #define MEM_SIZE   (1 << 16)
 #define DICT_WORDS 1024
-#define CTL_SIZE   256
 #define NAME_LEN   32
 
 #define F_IMMEDIATE 0x01
@@ -64,10 +63,6 @@ static cell dstack[STACK_SIZE];
 static int  sp = 0;
 static cell rstack[STACK_SIZE];
 static int  rp = 0;
-
-/* compile-time control-flow stack */
-static int ctl[CTL_SIZE];
-static int ctlsp = 0;
 
 /* ---- threaded code --------------------------------------------------- */
 static cell code[CODE_SIZE];
@@ -211,7 +206,6 @@ static void forth_type(const char *s, int len) {
 static void p_docol(void);
 static void p_push_addr(void);
 static void p_does(void);
-static void p_else(void);
 static void *jit_compile(Word *w);
 static void p_push_const(void);
 static void run_colon(Word *w);
@@ -244,19 +238,6 @@ static void emit(cell v) {
 }
 
 static void compile_xt(Word *w) { emit((cell)w); }
-
-static void ctl_push(int v) {
-    if (ctlsp >= CTL_SIZE) { throw_error("control stack full"); }
-    ctl[ctlsp++] = v;
-}
-
-static int ctl_pop(void) {
-    if (ctlsp <= 0) { throw_error("control stack underflow"); }
-    return ctl[--ctlsp];
-}
-
-/* patch the branch offset stored at `at` so it jumps to `target` */
-static void patch(int at, int target) { code[at] = target - (at + 1); }
 
 /* ---- compile log: reconstruct source for SEE -------------------------- */
 static char lbuf[4096];
@@ -523,132 +504,6 @@ static void p_to(void) {
     throw_error(msg);
 }
 
-static void p_if(void) {
-    compile_xt(W_0BRANCH);
-    emit(0);
-    ctl_push(here - 1);
-}
-
-static void p_then(void) {
-    int p = ctl_pop();
-    patch(p, here);
-}
-
-/* CASE / OF / ENDOF / ENDCASE (immediate, C control-flow stack) */
-#define CASE_MARK (-0x7fffffff)
-
-static void p_case(void) { ctl_push(CASE_MARK); }
-
-static void p_of(void) {
-    Word *over = find("OVER"), *eq = find("="), *drop = find("DROP");
-    if (!over || !eq || !drop) throw_error("CASE needs OVER = DROP");
-    compile_xt(over);
-    compile_xt(eq);
-    p_if();
-    compile_xt(drop);
-}
-
-static void p_endof(void) { p_else(); }
-
-static void p_endcase(void) {
-    Word *drop = find("DROP");
-    if (drop) compile_xt(drop);
-    while (ctlsp > 0 && ctl[ctlsp - 1] != CASE_MARK) p_then();
-    if (ctlsp > 0 && ctl[ctlsp - 1] == CASE_MARK) ctlsp--;
-}
-
-static void p_else(void) {
-    compile_xt(W_BRANCH);
-    emit(0);
-    patch(ctl_pop(), here);
-    ctl_push(here - 1);
-}
-
-static void p_begin(void) { ctl_push(here); }
-
-static void p_until(void) {
-    int b = ctl_pop();
-    compile_xt(W_0BRANCH);
-    emit(0);
-    patch(here - 1, b);
-}
-
-static void p_again(void) {
-    int b = ctl_pop();
-    compile_xt(W_BRANCH);
-    emit(0);
-    patch(here - 1, b);
-}
-
-static void p_while(void) {
-    compile_xt(W_0BRANCH);
-    emit(0);
-    ctl_push(here - 1);
-}
-
-static void p_repeat(void) {
-    int p = ctl_pop();
-    int b = ctl_pop();
-    compile_xt(W_BRANCH);
-    emit(0);
-    patch(here - 1, b);
-    patch(p, here);
-}
-
-/* counted loops use their own frame stack so ?DO/LEAVE can be resolved */
-typedef struct { int begin; int qdo; int leave[16]; int nleave; } LoopFrame;
-#define MAX_LOOPS 64
-static LoopFrame loops[MAX_LOOPS];
-static int nloops = 0;
-
-static LoopFrame *loop_push(void) {
-    if (nloops >= MAX_LOOPS) throw_error("too many loops");
-    LoopFrame *f = &loops[nloops++];
-    f->begin = here;
-    f->qdo = -1;
-    f->nleave = 0;
-    return f;
-}
-
-static LoopFrame *loop_top(void) {
-    if (nloops <= 0) throw_error("LOOP without DO");
-    return &loops[nloops - 1];
-}
-
-static void p_do(void) {
-    compile_xt(W_DO);
-    loop_push();
-}
-
-static void p_qdo(void) {
-    compile_xt(W_QDO);
-    emit(0);
-    LoopFrame *f = loop_push();
-    f->qdo = here - 1;
-    f->begin = here;
-}
-
-static void p_leave(void) {
-    LoopFrame *f = loop_top();
-    compile_xt(W_LEAVE);
-    emit(0);
-    if (f->nleave >= 16) throw_error("too many LEAVEs");
-    f->leave[f->nleave++] = here - 1;
-}
-
-static void close_loop(Word *endword) {
-    LoopFrame *f = loop_top();
-    compile_xt(endword);
-    emit(0);
-    patch(here - 1, f->begin);
-    for (int i = 0; i < f->nleave; i++) patch(f->leave[i], here);
-    if (f->qdo >= 0) patch(f->qdo, here);
-    nloops--;
-}
-
-static void p_loop(void)  { close_loop(W_LOOP); }
-static void p_ploop(void) { close_loop(W_PLOOP); }
-
 /* ===================================================================== */
 /*  stack / arithmetic / logic                                           */
 /* ===================================================================== */
@@ -661,20 +516,6 @@ static void p_ploop(void) { close_loop(W_PLOOP); }
 /* ===================================================================== */
 static void p_push_addr(void)  { push((cell)(mem + curr->data)); }
 static void p_push_const(void) { push(curr->data); }
-
-static void p_variable(void) {
-    char name[NAME_LEN];
-    if (!next_token(name)) { fputs("name expected after VARIABLE\n", stderr); return; }
-    Word *w = newword(name, p_push_addr);
-    w->data = memtop++;
-}
-
-static void p_constant(void) {
-    char name[NAME_LEN];
-    if (!next_token(name)) { fputs("name expected after CONSTANT\n", stderr); return; }
-    Word *w = newword(name, p_push_const);
-    w->data = pop();
-}
 
 static void p_immediate(void) { if (latest) latest->flags |= F_IMMEDIATE; }
 
@@ -841,23 +682,7 @@ static void p_forget(void) {           /* forget name and everything after */
 }
 
 /* ---- compiler kit ----------------------------------------------------- */
-static void p_here(void) { push(here); }
 static void p_compile_comma(void) { Word *w = (Word *)pop(); compile_xt(w); }
-static void p_code_comma(void) { emit(pop()); }
-static void p_code_store(void) {
-    cell at = pop(), v = pop();
-    if (at < 0 || at >= CODE_SIZE) throw_error("bad code address");
-    code[at] = v;
-}
-static void p_code_fetch(void) {
-    cell at = pop();
-    if (at < 0 || at >= CODE_SIZE) throw_error("bad code address");
-    push(code[at]);
-}
-static void p_state(void) { push((cell)(intptr_t)&state); }
-static void p_bracket(void) { state = 0; }
-static void p_rbracket(void) { state = 1; }
-static void p_literal(void) { cell v = pop(); compile_xt(W_LIT); emit(v); }
 
 /* ---- WORDS / SEE (kept in C: iteration + formatting) ------------------ */
 static void p_words(void) {
@@ -2729,130 +2554,6 @@ static void p_native_def(void) {
 static void p_c_putchar(void) { push((cell)(intptr_t)putchar); }
 
 /* ---- string and byte-memory words ------------------------------------- */
-static void p_move(void) {
-    cell u = pop(), d = pop(), s = pop();
-    if (u > 0) memmove((void *)(intptr_t)d, (const void *)(intptr_t)s, (size_t)u);
-}
-
-static void p_cmove(void) {
-    cell u = pop(), d = pop(), s = pop();
-    volatile unsigned char *dp = (unsigned char *)(intptr_t)d;
-    const unsigned char *sp = (const unsigned char *)(intptr_t)s;
-    while (u-- > 0) *dp++ = *sp++;
-}
-
-static void p_cmove_up(void) {
-    cell u = pop(), d = pop(), s = pop();
-    unsigned char *dp = (unsigned char *)(intptr_t)d;
-    const unsigned char *sp = (const unsigned char *)(intptr_t)s;
-    while (u-- > 0) dp[u] = sp[u];
-}
-
-static void p_fill(void) {
-    cell ch = pop(), u = pop(), a = pop();
-    if (u > 0) memset((void *)(intptr_t)a, (int)(ch & 0xFF), (size_t)u);
-}
-
-static void p_blank(void) {
-    cell u = pop(), a = pop();
-    if (u > 0) memset((void *)(intptr_t)a, ' ', (size_t)u);
-}
-
-static void p_compare(void) {
-    cell u2 = pop(), a2 = pop(), u1 = pop(), a1 = pop();
-    const unsigned char *p1 = (const unsigned char *)(intptr_t)a1;
-    const unsigned char *p2 = (const unsigned char *)(intptr_t)a2;
-    cell n = u1 < u2 ? u1 : u2, i = 0;
-    while (i < n && p1[i] == p2[i]) i++;
-    cell r;
-    if (i < n) r = (p1[i] < p2[i]) ? -1 : 1;
-    else r = (u1 < u2) ? -1 : (u1 > u2) ? 1 : 0;
-    push(r);
-}
-
-static void p_search(void) {
-    cell u2 = pop(), a2 = pop(), u1 = pop(), a1 = pop();
-    const unsigned char *h = (const unsigned char *)(intptr_t)a1;
-    const unsigned char *n = (const unsigned char *)(intptr_t)a2;
-    for (cell i = 0; i + u2 <= u1; i++)
-        if (u2 == 0 || memcmp(h + i, n, (size_t)u2) == 0) {
-            push((cell)(intptr_t)(h + i)); push(u1 - i); push(-1); return;
-        }
-    push(a1); push(u1); push(0);
-}
-
-static void p_trailing(void) {
-    cell u = pop(), a = pop();
-    const char *p = (const char *)(intptr_t)a;
-    while (u > 0 && p[u - 1] == ' ') u--;
-    push(a); push(u);
-}
-
-static void p_slash_string(void) {
-    cell n = pop(), u = pop(), a = pop();
-    push(a + n); push(u - n);
-}
-
-static void p_count(void) {
-    cell a = pop();
-    push(a + 1); push((cell)*(unsigned char *)(intptr_t)a);
-}
-
-static void p_place(void) {
-    cell c2 = pop(), u = pop(), c1 = pop();
-    unsigned char *d = (unsigned char *)(intptr_t)c2;
-    if (u > 255) u = 255;
-    d[0] = (unsigned char)u;
-    if (u > 0) memmove(d + 1, (const void *)(intptr_t)c1, (size_t)u);
-}
-
-static void p_spaces(void) {
-    cell n = pop();
-    while (n-- > 0) putchar(' ');
-}
-
-static void p_cfetch(void) { cell a = pop(); push((unsigned char)*(char *)(intptr_t)a); }
-static void p_cstore(void) { cell a = pop(), v = pop(); *(unsigned char *)(intptr_t)a = (unsigned char)v; }
-
-static void p_char(void) {
-    char name[NAME_LEN];
-    if (!next_token(name)) throw_error("CHAR needs a name");
-    push((unsigned char)name[0]);
-}
-
-static void p_bracket_char(void) {
-    if (state != 1) throw_error("[CHAR] only in compile state");
-    char name[NAME_LEN];
-    if (!next_token(name)) throw_error("[CHAR] needs a name");
-    compile_xt(W_LIT); emit((unsigned char)name[0]);
-}
-
-static int digit_from_char(int c, int base) {
-    int d;
-    if (c >= '0' && c <= '9') d = c - '0';
-    else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
-    else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
-    else return -1;
-    return d < base ? d : -1;
-}
-
-static void p_to_number(void) {
-    cell u = pop(), a = pop(), hi = pop(), lo = pop();
-    const unsigned char *p = (const unsigned char *)(intptr_t)a;
-    unsigned long long acc = ((unsigned long long)(unsigned long)hi << 32) | (unsigned long)lo;
-    cell i = 0;
-    while (i < u) {
-        int d = digit_from_char(p[i], 10);
-        if (d < 0) break;
-        acc = acc * 10u + (unsigned)d;
-        i++;
-    }
-    push((cell)(unsigned long)acc);
-    push((cell)(unsigned long long)(acc >> 32));
-    push(a + i);
-    push(u - i);
-}
-
 /* ---- dlopen / dlsym Forth surface ------------------------------------- */
 static void p_dlopen(void) {
     cell len = pop();
@@ -2954,29 +2655,9 @@ static void init_dict(void) {
     def_imm("DOES>", p_does_quote);
     define_prim("JIT", p_jit);
     define_prim("JIT-ALL", p_jit_all);
-    define_prim("VARIABLE", p_variable);
-    define_prim("CONSTANT", p_constant);
     define_prim("WORDS", p_words);
     define_prim("SEE", p_see);
-
-    /* strings / byte memory */
-    define_prim("MOVE", p_move);
-    define_prim("CMOVE", p_cmove);
-    define_prim("CMOVE>", p_cmove_up);
-    define_prim("FILL", p_fill);
-    define_prim("BLANK", p_blank);
-    define_prim("COMPARE", p_compare);
-    define_prim("SEARCH", p_search);
-    define_prim("-TRAILING", p_trailing);
-    define_prim("/STRING", p_slash_string);
-    define_prim(">NUMBER", p_to_number);
-    define_prim("COUNT", p_count);
-    define_prim("PLACE", p_place);
-    define_prim("SPACES", p_spaces);
-    define_prim("C@", p_cfetch);
-    define_prim("C!", p_cstore);
-    define_prim("CHAR", p_char);
-    def_imm("[CHAR]", p_bracket_char);
+    /* strings / byte memory live in the native prelude */
 
     /* compiler */
     def_imm(":", p_colon);
@@ -2993,32 +2674,7 @@ static void init_dict(void) {
     def_imm("POSTPONE", p_postpone);
     def_imm("[COMPILE]", p_bracket_compile);
     define_prim("IMMEDIATE", p_immediate);
-    define_prim("HERE", p_here);
     define_prim("COMPILE,", p_compile_comma);
-    define_prim("CODE,", p_code_comma);
-    define_prim("CODE!", p_code_store);
-    define_prim("CODE@", p_code_fetch);
-    define_prim("STATE", p_state);
-    def_imm("[", p_bracket);
-    def_imm("]", p_rbracket);
-    def_imm("LITERAL", p_literal);
-    def_imm("IF", p_if);
-    def_imm("ELSE", p_else);
-    def_imm("THEN", p_then);
-    def_imm("CASE", p_case);
-    def_imm("OF", p_of);
-    def_imm("ENDOF", p_endof);
-    def_imm("ENDCASE", p_endcase);
-    def_imm("BEGIN", p_begin);
-    def_imm("UNTIL", p_until);
-    def_imm("AGAIN", p_again);
-    def_imm("WHILE", p_while);
-    def_imm("REPEAT", p_repeat);
-    def_imm("DO", p_do);
-    def_imm("?DO", p_qdo);
-    def_imm("LEAVE", p_leave);
-    def_imm("LOOP", p_loop);
-    def_imm("+LOOP", p_ploop);
     W_LOCAL       = define_prim("(local)",       p_local);
     W_LOCAL_STORE = define_prim("(local!)",      p_local_store);
     W_LOCALS_ENTER = define_prim("(locals-enter)", p_locals_enter);
@@ -3083,7 +2739,6 @@ static void run_line(void) {
         /* an error aborted this line: reset to a clean interpreter state */
         sp = 0;
         rp = 0;
-        ctlsp = 0;
         state = 0;
         compiling = NULL;
         ip = -1;
