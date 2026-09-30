@@ -1,0 +1,9 @@
+# build artifacts
+/forth
+/prelude_blob.h
+/tools/mkprelude
+*.o
+
+# core dumps
+core
+core.*
