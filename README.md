@@ -17,9 +17,21 @@ The whole system is a single file, `forth.c`, built with gcc on Linux.
 make            # -> ./forth
 ./forth         # interactive REPL (prompt "> ")
 ./forth test.fs # run a script, then drop into the REPL
-make test       # run test.fs and test-native.fs
+make test       # run the test scripts
 make asan       # build with AddressSanitizer + UBSan
 ```
+
+Command line:
+
+```
+forth [--require FILE]... [--repl WORD] [FILE]
+```
+
+- `--require FILE` evaluates `REQUIRE FILE` before starting (repeatable).
+- `--repl WORD` runs the Forth word `WORD` instead of the built-in REPL
+  (e.g. `--require scheme.fs --repl SCHEME`). Requiring a library and running
+  its entry point is entirely up to the caller; the core knows no language.
+- a bare `FILE` is run first, like `./forth FILE`.
 
 SLJIT is vendored under `third_party/sljit_src` and pinned in
 `third_party/sljit_VERSION`; the build compiles only `sljitLir.c`.
@@ -86,6 +98,20 @@ signed machine cells (`long`).
 | `LSHIFT` `RSHIFT` | `( a u -- n )` | logical shifts by `u` bits             |
 
 Division by zero raises `div by zero` and aborts the line.
+
+## Floating point
+
+Doubles are stored as a 64-bit bit pattern in a single cell; literals with a
+`.` or exponent (`1.5`, `2e3`) push a double. There is no separate float stack.
+
+| Word | Effect | Description |
+|------|--------|-------------|
+| `S>F` `F>S` | `( n -- )` / `( f -- n )` | convert integer ↔ double |
+| `F+` `F-` `F*` `F/` | `( f1 f2 -- f )` | double arithmetic |
+| `FNEGATE` `FABS` `FSQRT` | | double unary operations |
+| `F<` `F>` `F=` | `( f1 f2 -- flag )` | double comparisons |
+| `FDUP` `FDROP` `FSWAP` `FOVER` | | double stack operations |
+| `F.` | `( f -- )` | print a double |
 
 ## Comparison
 
@@ -314,8 +340,14 @@ Up to 16 locals per definition. Early `EXIT` still tears the frame down.
 
 ## Memory, variables and constants
 
-There is a flat, cell-addressed data space (`mem[]`). Addresses are raw cell
-pointers.
+The data space is a reserved region that grows by committing pages, so its
+addresses are stable and it is not limited to a fixed size. Addresses are raw
+cell pointers.
+
+Dynamic memory is also available: `MALLOC`/`REALLOC`/`FREE` (libc) and `ALLOC`
+(a stable-address arena whose `ARENA-RESET` releases it administratively,
+without returning pages to the OS). The dictionary and the code space grow on
+demand as well.
 
 | Word         | Effect            | Description                                  |
 |--------------|-------------------|----------------------------------------------|
@@ -323,6 +355,11 @@ pointers.
 | `@`          | `( addr -- x )`   | fetch from `addr`                            |
 | `,`          | `( x -- )`        | append `x` to the data space                 |
 | `ALLOT`      | `( n -- )`        | reserve `n` cells in the data space          |
+| `MALLOC`     | `( n -- a )`      | allocate `n` bytes (libc)                    |
+| `REALLOC`    | `( a n -- a' )`   | resize an allocation (libc)                  |
+| `FREE`       | `( a -- )`        | free a libc allocation                       |
+| `ALLOC`      | `( n -- a )`      | allocate from the arena (stable address)     |
+| `ARENA-RESET`| `( -- )`          | release the arena administratively           |
 | `VARIABLE`   | `( -- )`          | `VARIABLE name`; defines `name` to push its address |
 | `CONSTANT`   | `( x -- )`        | `x CONSTANT name`; defines constant `name`   |
 
@@ -725,6 +762,85 @@ many were compiled).
 JIT sq
 5 sq . CR        \ 25
 ```
+
+## Bytecode VM skeleton
+
+The VM lives in the library `lib/vm.fs` (not in the core prelude). Load it on
+demand:
+
+```
+REQUIRE vm.fs
+```
+
+`INCLUDE name` evaluates a Forth file; `REQUIRE name` does the same but only
+once. A name is looked up as given, then under `lib/`, then in the
+colon-separated directories of `$FORTH_PATH`.
+
+The VM is a tiny generic stack machine with **explicit state**
+(`VM-PC`, `VM-SP`, `VM-CODE`, an operand stack in a reserved region) and a
+dispatch loop over a table of execution tokens (`VM-OPS`, one per opcode,
+driven by `EXECUTE`). Keeping the state explicit is what makes `call/cc`
+(capture/restore) and coroutines (several states) implementable; it is meant
+as the target that language front-ends compile to.
+
+```
+CREATE PROG                       \ sum 1..10
+  1 , 0 , 1 , 10 , 5 , 8 , 16 , 10 , 11 , 2 , 10 ,
+  1 , 1 , 3 , 7 , 4 , 6 , 9 , 0 ,
+PROG VM-BIND VM-RUN CR            \ 55
+```
+
+Words: `VM-BIND ( code -- )`, `VM-RESET`, `VM-STEP`, `VM-RUN`, plus the
+opcode constants `OP-HALT OP-PUSH OP-ADD OP-SUB OP-MUL OP-DUP OP-DROP OP-JMP
+OP-JZ OP-PRINT OP-SWAP OP-OVER OP-CC OP-INVOKE`.
+
+Because the state is explicit, continuations and coroutines are just captured
+state:
+
+- `VM-CAPTURE ( pc -- k )` snapshots the operand stack and a resume `pc`;
+  `VM-INSTALL ( k v -- )` restores it and delivers `v` as the call/cc result.
+  `OP-CC` / `OP-INVOKE` expose this to bytecode (`call/cc`).
+- `VM-STATE-NEW ( code -- co )` makes independent VM states (stack + code + pc +
+  sp); `VM-SWITCH ( co -- )` swaps the active state (coroutines).
+
+```
+CREATE CC1 12 , 8 , 1 , 222 , 13 , 1 , 111 , 9 , 9 , 0 ,
+CC1 VM-BIND VM-RUN CR     \ 222  (111 is skipped by the continuation)
+```
+
+## Minimal Scheme (`lib/scheme.fs`)
+
+A tree-walking Scheme interpreter is included as a library, validating that
+the base can host a higher-level language:
+
+```
+REQUIRE scheme.fs
+S" (define (fact n) (if (= n 0) 1 (* n (fact (- n 1)))))" SCHEME-EVAL
+S" (fact 6)" SCHEME-EVAL                 \ 720
+S" (map (lambda (x) (* x x)) (list 1 2 3 4))" SCHEME-EVAL   \ (1 4 9 16)
+```
+
+It provides tagged values (fixnums, pairs, symbols, strings, closures,
+primitives), interned symbols, lexical environments, closures with capture,
+tail-recursive iteration via the host, `quote if lambda define set! begin let
+and or`, and primitives `+ - * / = < cons car cdr list null? pair? not eq?
+display newline`. `SCHEME-EVAL ( c-addr u -- )` reads and evaluates every form
+in a string, printing each result. Values live on the same arena heap as the
+Forth side.
+
+An interactive REPL is `SCHEME` (prompt `scheme> `, exits on EOF):
+
+```sh
+./forth --require scheme.fs --repl SCHEME
+scheme> (+ 1 2)
+3
+scheme> (define (sq x) (* x x))
+scheme> (sq 9)
+81
+```
+
+It is built on the `READ-LINE ( -- c-addr u )` primitive (one line from stdin,
+length 0 at EOF).
 
 The generated function keeps the **stack pointer in a register** (the same
 register ABI as prelude words), calls prelude/native words directly through

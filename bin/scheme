@@ -1,0 +1,8 @@
+#!/bin/sh
+# Launcher for the embedded Scheme REPL (lib/scheme.fs).
+#
+# The Forth binary is generic (it only knows --require/--repl); this wrapper is
+# where the "Scheme" entry point lives, keeping language runtimes out of the core.
+set -eu
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$dir/../forth" --require "$dir/../lib/scheme.fs" --repl SCHEME "$@"

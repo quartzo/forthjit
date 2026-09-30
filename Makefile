@@ -37,14 +37,17 @@ $(TINF_OBJ): $(TINF_DIR)/tinflate.c $(TINF_DIR)/tinf.h
 
 $(TARGET): forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
 	$(CC) $(CFLAGS) $(SHRINK) $(CPPFLAGS) $(LDFLAGS) -o $@ forth.c \
-	      $(SLJIT_OBJ) $(TINF_OBJ) -ldl -Wl,-s
+	      $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -Wl,-s
 
 test: $(TARGET)
 	./$(TARGET) test.fs </dev/null
 	./$(TARGET) test-native.fs </dev/null
+	./$(TARGET) test-lib.fs </dev/null
+	./$(TARGET) test-scheme.fs </dev/null
+	@printf '(+ 1 2)\n' | ./$(TARGET) --require scheme.fs --repl SCHEME >/dev/null
 
 asan: forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm
 
 clean:
 	rm -f $(TARGET) $(SLJIT_OBJ) $(TINF_OBJ) $(MKPRELUDE) $(PRELUDE_HDR)

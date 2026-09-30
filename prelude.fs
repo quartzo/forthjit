@@ -398,32 +398,7 @@ CODE DEPTH
   mov R0, S1
 ;CODE
 
-CODE ,
-  require 1
-  mov R0, &memtop
-  mov.u32 R1, [R0]
-  mov R2, &mem
-  shl R1, R1, #3
-  add R2, R2, R1
-  mov R1, [S1-8]
-  mov [R2], R1
-  mov.u32 R1, [R0]
-  add R1, R1, #1
-  mov32 [R0], R1
-  add S1, S1, #-8
-  mov R0, S1
-;CODE
-
-CODE ALLOT
-  require 1
-  mov R0, &memtop
-  mov.u32 R1, [R0]
-  mov R2, [S1-8]
-  add R1, R1, R2
-  mov32 [R0], R1
-  add S1, S1, #-8
-  mov R0, S1
-;CODE
+\ `,` and `ALLOT` are C primitives over the reserved data region.
 
 \ ---- code space access (native) ------------------------------------------
 
@@ -431,6 +406,7 @@ CODE CODE@
   require 1
   mov R0, [S1-8]
   mov R1, &code
+  mov R1, [R1]
   shl R0, R0, #3
   add R1, R1, R0
   mov R0, [R1]
@@ -443,26 +419,11 @@ CODE CODE!
   mov R0, [S1-8]
   mov R1, [S1-16]
   mov R2, &code
+  mov R2, [R2]
   shl R0, R0, #3
   add R2, R2, R0
   mov [R2], R1
   add S1, S1, #-16
-  mov R0, S1
-;CODE
-
-CODE CODE,
-  require 1
-  mov R0, &here
-  mov R1, [R0]
-  mov R2, &code
-  shl R1, R1, #3
-  add R2, R2, R1
-  mov R1, [S1-8]
-  mov [R2], R1
-  mov R1, [R0]
-  add R1, R1, #1
-  mov [R0], R1
-  add S1, S1, #-8
   mov R0, S1
 ;CODE
 

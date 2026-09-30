@@ -9,11 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <ctype.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <setjmp.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include "tinf.h"
 
 #include "sljitLir.h"
@@ -49,10 +51,7 @@ typedef long cell;
 #define TRUE  (-1L)
 #define FALSE (0L)
 
-#define STACK_SIZE 1024
-#define CODE_SIZE  (1 << 16)
-#define MEM_SIZE   (1 << 16)
-#define DICT_WORDS 1024
+#define STACK_RESERVE ((size_t)1 << 26)   /* 64 MiB virtual per stack */
 #define NAME_LEN   32
 
 #define F_IMMEDIATE 0x01
@@ -119,6 +118,7 @@ typedef struct { int mk_nwords; Word *mk_latest; int mk_memtop; int mk_here; } M
 /* ---- dynamic library registry ---------------------------------------- */
 #define MAX_DYNLIB 64
 #define MAX_DYNSYM 256
+#define MAX_LOADED 64
 #define DYN_NAME   128
 typedef struct { char name[DYN_NAME]; void *handle; int flags; } DynLib;
 typedef struct { void *handle; char name[DYN_NAME]; void *addr; } DynSym;
@@ -137,30 +137,55 @@ typedef struct { char name[32]; sljit_uw addr; sljit_s32 op; } PatchConst;
 /* ---- generated code registry ----------------------------------------- */
 #define MAX_JIT 1024
 
-struct forth {
-    /* stacks */
-    cell dstack[STACK_SIZE];
-    int  sp;
-    cell rstack[STACK_SIZE];
-    int  rp;
+/* ---- stable-address arena -------------------------------------------- */
+/* Blocks are malloc'd and never moved nor returned to the OS; freeing is
+   administrative (arena_reset rewinds every block). */
+typedef struct ArenaBlock { struct ArenaBlock *next; size_t used, cap; } ArenaBlock;
+typedef struct {
+    ArenaBlock *head;   /* most recently allocated block */
+    ArenaBlock *cur;    /* block currently bump-allocated */
+    size_t      block;  /* default block size */
+} Arena;
 
-    /* threaded code */
-    cell fcode[CODE_SIZE];
-    cell here;
+/* ---- contiguous growable region -------------------------------------- */
+/* Reserves virtual address space (PROT_NONE) and commits pages on demand.
+   The base never moves and is never returned to the OS, so addresses baked
+   into generated code stay valid; release is administrative (rewind). */
+typedef struct {
+    char  *base;
+    size_t used, committed, reserved;
+} Region;
+
+static int region_ensure(Region *r, size_t need);
+
+struct forth {
+    /* stacks: pointers into reserved regions (stable base, grow by commit) */
+    Region dstack_r;
+    cell  *dstack;
+    int    sp;
+    Region rstack_r;
+    cell  *rstack;
+    int    rp;
+
+    /* threaded code: growable buffer (realloc of a pointer field) */
+    cell  *fcode;
+    size_t codecap;
+    cell  here;
     cell ip;
 
-    /* data memory */
-    cell mem[MEM_SIZE];
-    int  memtop;
+    /* data memory: reserved region + cell cursor (memtop) */
+    Region data;
+    cell   memtop;
 
-    /* dictionary */
-    Word  dict[DICT_WORDS];
+    /* dictionary: malloc'd nodes linked backwards from `latest` */
     int   nwords;
     Word *latest;
     Word *compiling;
     Word *curr;
     cell  state;
     Word *last_created;
+    Arena heap;                 /* user/guest arena (ALLOC / ARENA-RESET) */
+    Arena words;                /* arena for dictionary Word nodes */
     Word *W_EXIT, *W_LIT, *W_BRANCH, *W_0BRANCH, *W_ABORTQ, *W_DOES;
     Word *W_DO, *W_LOOP, *W_PLOOP, *W_QDO, *W_LEAVE;
     Word *W_LOCAL, *W_LOCALS_ENTER, *W_LOCALS_EXIT, *W_LOCAL_STORE;
@@ -176,6 +201,7 @@ struct forth {
     /* input */
     char  inbuf[4096];
     char *inbuf_ptr;
+    char  rline[4096];          /* buffer for READ-LINE */
     int   cond_skip, cond_depth;
 
     /* compile log (SEE) */
@@ -235,6 +261,10 @@ struct forth {
     DynSym dynsyms[MAX_DYNSYM];
     int    nsyms;
     char   dyn_err[256];
+
+    /* INCLUDEd / REQUIREd files */
+    char   loaded[MAX_LOADED][256];
+    int    nloaded;
 };
 
 
@@ -273,7 +303,8 @@ static void forth_need(cell have, cell need, struct forth *F) {
 }
 /* native stack-overflow guard: icall &forth_room with (have need -- ) */
 static void forth_room(cell have, cell need, struct forth *F) {
-    if (have + need > STACK_SIZE) raise(F, ERR_OVF, "stack overflow");
+    if (!region_ensure(&F->dstack_r, (size_t)(have + need) * sizeof(cell)))
+        raise(F, ERR_OVF, "stack overflow");
 }
 /* icall &forth_type with (c-addr u -- ), uses stdio like EMIT */
 static void forth_type(const char *s, int len, struct forth *F) {
@@ -297,11 +328,21 @@ static void p_endcode(struct forth *F);
 static void p_irquote(struct forth *F);
 static void ir_put(struct forth *F, const char *tok);
 static void p_native(struct forth *F);
+static void run_line(struct forth *F);
+static void p_include(struct forth *F);
+static void p_require(struct forth *F);
 
 /* ---- stack helpers --------------------------------------------------- */
 static void push(struct forth *F, cell v) {
-    if (F->sp >= STACK_SIZE) { raise(F, ERR_OVF, "stack overflow"); }
+    if (!region_ensure(&F->dstack_r, (size_t)(F->sp + 1) * sizeof(cell)))
+        raise(F, ERR_OVF, "stack overflow");
     F->dstack[F->sp++] = v;
+}
+
+static void rpush(struct forth *F, cell v) {
+    if (!region_ensure(&F->rstack_r, (size_t)(F->rp + 1) * sizeof(cell)))
+        raise(F, ERR_RSTK, "return stack overflow");
+    F->rstack[F->rp++] = v;
 }
 
 static cell pop(struct forth *F) {
@@ -311,8 +352,18 @@ static cell pop(struct forth *F) {
 
 
 /* ---- code emission --------------------------------------------------- */
+static void ensure_code(struct forth *F, cell extra) {
+    if (F->here + extra <= (cell)F->codecap) return;
+    size_t cap = F->codecap ? F->codecap : 4096;
+    while (cap < (size_t)(F->here + extra)) cap *= 2;
+    cell *p = realloc(F->fcode, cap * sizeof(cell));
+    if (!p) throw_error(F, "code space out of memory");
+    F->fcode = p;
+    F->codecap = cap;
+}
+
 static void emit(struct forth *F, cell v) {
-    if (F->here >= CODE_SIZE) { throw_error(F, "code space full"); }
+    ensure_code(F, 1);
     F->fcode[F->here++] = v;
 }
 
@@ -330,24 +381,81 @@ static void log_put(struct forth *F, const char *s) {
     F->lbuf[F->llen] = 0;
 }
 
+/* ---- stable-address arena -------------------------------------------- */
+static void arena_init(Arena *a, size_t block) {
+    a->head = a->cur = NULL;
+    a->block = block ? block : (size_t)(1u << 20);
+}
+
+static void *arena_alloc(Arena *a, size_t n) {
+    n = (n + 7u) & ~(size_t)7u;
+    if (!a->cur || a->cur->used + n > a->cur->cap) {
+        size_t cap = n > a->block ? n : a->block;
+        ArenaBlock *b = malloc(sizeof(ArenaBlock) + cap);
+        if (!b) return NULL;
+        b->next = a->head;
+        b->used = 0;
+        b->cap = cap;
+        a->head = a->cur = b;
+    }
+    void *p = (char *)(a->cur + 1) + a->cur->used;
+    a->cur->used += n;
+    return p;
+}
+
+/* administrative release: rewind every block, keep the memory */
+static void arena_reset(Arena *a) {
+    for (ArenaBlock *b = a->head; b; b = b->next) b->used = 0;
+    a->cur = a->head;
+}
+
+static void arena_destroy(Arena *a) {
+    ArenaBlock *b = a->head;
+    while (b) { ArenaBlock *n = b->next; free(b); b = n; }
+    a->head = a->cur = NULL;
+}
+
+/* ---- contiguous growable region -------------------------------------- */
+static int region_init(Region *r, size_t reserve) {
+    r->reserved = reserve;
+    r->used = r->committed = 0;
+    r->base = mmap(NULL, reserve, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (r->base == MAP_FAILED) { r->base = NULL; return 0; }
+    return 1;
+}
+
+static int region_ensure(Region *r, size_t need) {
+    if (!r->base || need > r->reserved) return 0;
+    if (need > r->committed) {
+        const size_t page = 4096;
+        size_t c = (need + page - 1) & ~(page - 1);
+        if (mprotect(r->base + r->committed, c - r->committed,
+                     PROT_READ | PROT_WRITE) != 0) return 0;
+        r->committed = c;
+    }
+    return 1;
+}
+
+static void region_destroy(Region *r) {
+    if (r->base) munmap(r->base, r->reserved);
+    r->base = NULL;
+    r->used = r->committed = r->reserved = 0;
+}
+
 /* ---- dictionary construction ---------------------------------------- */
 static Word *newword(struct forth *F, const char *name, Prim code) {
-    if (F->nwords >= DICT_WORDS) { throw_error(F, "dictionary full"); }
-    Word *w = &F->dict[F->nwords++];
+    Word *w = arena_alloc(&F->words, sizeof(Word));
+    if (!w) throw_error(F, "dictionary out of memory");
+    memset(w, 0, sizeof(Word));
     w->link = F->latest;
     F->latest = w;
+    F->nwords++;
     strncpy(w->name, name, NAME_LEN - 1);
     w->name[NAME_LEN - 1] = 0;
-    w->flags = 0;
     w->code = code;
     w->body = -1;
     w->body_end = -1;
-    w->data = 0;
-    free(w->irbody);
-    free(w->src);
-    w->native = NULL;
-    w->irbody = NULL;
-    w->src = NULL;
     return w;
 }
 
@@ -384,7 +492,7 @@ static cell  forth_hidden(Word *w, struct forth *F) { (void)F; return (w && (w->
 static cell  forth_colon_p(Word *w, struct forth *F) { (void)F; return (w && w->body >= 0) ? -1 : 0; }
 static cell  forth_native_p(Word *w, struct forth *F) { (void)F; return (w && w->code == p_native) ? -1 : 0; }
 static cell  forth_variable_p(Word *w, struct forth *F) { (void)F; return (w && w->code == p_push_addr) ? -1 : 0; }
-static void *forth_body(Word *w, struct forth *F) { return (w && (w->code == p_push_addr || w->code == p_does)) ? (void *)(F->mem + w->data) : NULL; }
+static void *forth_body(Word *w, struct forth *F) { return (w && (w->code == p_push_addr || w->code == p_does)) ? (void *)((cell *)F->data.base + w->data) : NULL; }
 
 /* ===================================================================== */
 /*  VM primitives                                                        */
@@ -410,21 +518,19 @@ static void p_0branch(struct forth *F) {
 
 /* (do) -- move limit,start from data stack onto return stack */
 static void rt_do(struct forth *F) {
-    if (F->rp + 2 > STACK_SIZE) { raise(F, ERR_RSTK, "return stack overflow"); }
     cell start = pop(F);
     cell limit = pop(F);
-    F->rstack[F->rp++] = limit;
-    F->rstack[F->rp++] = start;
+    rpush(F, limit);
+    rpush(F, start);
 }
 
 /* (?do) -- like (do) but skip the loop when start == limit */
 static void rt_qdo(struct forth *F) {
-    if (F->rp + 2 > STACK_SIZE) { raise(F, ERR_RSTK, "return stack overflow"); }
     cell start = pop(F);
     cell limit = pop(F);
     int off = (int)F->fcode[F->ip++];
     if (start == limit) F->ip += off;
-    else { F->rstack[F->rp++] = limit; F->rstack[F->rp++] = start; }
+    else { rpush(F, limit); rpush(F, start); }
 }
 
 /* (leave) -- drop the loop frame and jump past LOOP */
@@ -505,10 +611,9 @@ static void p_locals_enter(struct forth *F) {
     cell no = pop(F);
     cell ni = pop(F);
     if (ni < 0 || no < 0) throw_error(F, "bad locals frame");
-    if (F->rp + 2 > STACK_SIZE) raise(F, ERR_RSTK, "return stack overflow");
     if (F->lfree + (int)(ni + no) > LOCALS_MAX) throw_error(F, "too many locals");
-    F->rstack[F->rp++] = F->lfbase;
-    F->rstack[F->rp++] = F->lfree;
+    rpush(F, F->lfbase);
+    rpush(F, F->lfree);
     F->lfbase = F->lfree;
     F->lfree += (int)(ni + no);
     for (cell i = 0; i < ni; i++) F->locals[F->lfbase + (ni - 1 - i)] = pop(F);
@@ -592,10 +697,72 @@ static void p_to(struct forth *F) {
 /* ===================================================================== */
 /*  memory / variables                                                   */
 /* ===================================================================== */
-static void p_push_addr(struct forth *F)  { push(F, (cell)(F->mem + F->curr->data)); }
+static void p_push_addr(struct forth *F)  { push(F, (cell)((cell *)F->data.base + F->curr->data)); }
 static void p_push_const(struct forth *F) { push(F, F->curr->data); }
 
 static void p_immediate(struct forth *F) { if (F->latest) F->latest->flags |= F_IMMEDIATE; }
+
+/* ---- heap: libc malloc family + a stable-address arena ---------------- */
+static void p_malloc(struct forth *F)  { push(F, (cell)(intptr_t)malloc((size_t)pop(F))); }
+static void p_realloc(struct forth *F) {
+    size_t n = (size_t)pop(F);
+    void  *a = (void *)(intptr_t)pop(F);
+    push(F, (cell)(intptr_t)realloc(a, n));
+}
+static void p_free(struct forth *F)    { free((void *)(intptr_t)pop(F)); }
+static void p_alloc(struct forth *F)   { push(F, (cell)(intptr_t)arena_alloc(&F->heap, (size_t)pop(F))); }
+static void p_arena_reset(struct forth *F) { arena_reset(&F->heap); }
+
+/* read one line from stdin: ( -- c-addr u ); u = 0 at EOF */
+static void p_read_line(struct forth *F) {
+    if (!fgets(F->rline, sizeof F->rline, stdin)) { push(F, 0); push(F, 0); return; }
+    size_t n = strlen(F->rline);
+    while (n && (F->rline[n-1] == '\n' || F->rline[n-1] == '\r')) F->rline[--n] = 0;
+    push(F, (cell)(intptr_t)F->rline);
+    push(F, (cell)n);
+}
+
+/* ---- floating point: doubles live as bit patterns in cells ------------ */
+static double d_from(cell c) { double d; memcpy(&d, &c, sizeof d); return d; }
+static cell   d_to(double d) { cell c; memcpy(&c, &d, sizeof c); return c; }
+
+static void p_s2f(struct forth *F)  { push(F, d_to((double)pop(F))); }
+static void p_f2s(struct forth *F)  { push(F, (cell)d_from(pop(F))); }
+static void p_fadd(struct forth *F) { double b = d_from(pop(F)), a = d_from(pop(F)); push(F, d_to(a + b)); }
+static void p_fsub(struct forth *F) { double b = d_from(pop(F)), a = d_from(pop(F)); push(F, d_to(a - b)); }
+static void p_fmul(struct forth *F) { double b = d_from(pop(F)), a = d_from(pop(F)); push(F, d_to(a * b)); }
+static void p_fdiv(struct forth *F) {
+    double b = d_from(pop(F));
+    if (b == 0.0) raise(F, ERR_DIVZERO, "float div by zero");
+    double a = d_from(pop(F));
+    push(F, d_to(a / b));
+}
+static void p_fneg(struct forth *F)  { push(F, d_to(-d_from(pop(F)))); }
+static void p_fabs(struct forth *F)  { push(F, d_to(fabs(d_from(pop(F))))); }
+static void p_fsqrt(struct forth *F) { push(F, d_to(sqrt(d_from(pop(F))))); }
+static void p_flt(struct forth *F)   { double b = d_from(pop(F)), a = d_from(pop(F)); push(F, a < b ? -1 : 0); }
+static void p_fgt(struct forth *F)   { double b = d_from(pop(F)), a = d_from(pop(F)); push(F, a > b ? -1 : 0); }
+static void p_feq(struct forth *F)   { double b = d_from(pop(F)), a = d_from(pop(F)); push(F, a == b ? -1 : 0); }
+static void p_fdup(struct forth *F)  { cell c = pop(F); push(F, c); push(F, c); }
+static void p_fdrop(struct forth *F) { (void)pop(F); }
+static void p_fswap(struct forth *F) { cell b = pop(F), a = pop(F); push(F, b); push(F, a); }
+static void p_fover(struct forth *F) { cell b = pop(F), a = pop(F); push(F, a); push(F, b); push(F, a); }
+static void p_fdot(struct forth *F)  { printf("%g ", d_from(pop(F))); }
+
+/* ---- data space: cell cursor into the reserved region ----------------- */
+static void p_comma(struct forth *F) {
+    cell v = pop(F);
+    if (!region_ensure(&F->data, (size_t)(F->memtop + 1) * sizeof(cell)))
+        throw_error(F, "data space out of memory");
+    ((cell *)F->data.base)[F->memtop++] = v;
+}
+static void p_allot(struct forth *F) {
+    cell n = pop(F);
+    if (n < 0) throw_error(F, "negative ALLOT");
+    if (!region_ensure(&F->data, (size_t)(F->memtop + n) * sizeof(cell)))
+        throw_error(F, "data space out of memory");
+    F->memtop += n;
+}
 
 /* ---- CREATE / DOES> --------------------------------------------------- */
 
@@ -617,7 +784,7 @@ static void p_does_setup(struct forth *F) {        /* (does>) */
 }
 
 static void p_does(struct forth *F) {              /* runtime of a CREATE..DOES> word */
-    push(F, (cell)(F->mem + F->curr->data));
+    push(F, (cell)((cell *)F->data.base + F->curr->data));
     cell saved = F->ip;
     run_colon(F, F->curr);
     F->ip = saved;
@@ -643,8 +810,7 @@ static void p_jit(struct forth *F) {
 /* JIT-ALL -- compile every colon word that can be compiled */
 static void p_jit_all(struct forth *F) {
     int count = 0;
-    for (int i = 0; i < F->nwords; i++) {
-        Word *w = &F->dict[i];
+    for (Word *w = F->latest; w; w = w->link) {
         if (w->body >= 0 && w->code == p_docol) {
             void *jit = jit_compile(F, w);
             if (jit) { w->native = jit; w->code = p_native; count++; }
@@ -722,6 +888,7 @@ static void p_marker_run(struct forth *F) {
     int idx = (int)F->curr->data;
     if (idx < 0 || idx >= F->nmarkers) throw_error(F, "bad marker");
     MarkerState *m = &F->markers[idx];
+    for (Word *w = F->latest; w != m->mk_latest; w = w->link) { free(w->irbody); free(w->src); }
     F->nwords = m->mk_nwords;
     F->latest = m->mk_latest;
     F->memtop = m->mk_memtop;
@@ -748,16 +915,22 @@ static void p_marker(struct forth *F) {
 static void p_forget(struct forth *F) {           /* forget name and everything after */
     char name[NAME_LEN];
     if (!next_token(F, name)) throw_error(F, "name expected after FORGET");
-    int i;
-    for (i = 0; i < F->nwords; i++)
-        if (strcmp(F->dict[i].name, name) == 0) break;
-    if (i >= F->nwords) throw_error(F, "? FORGET");
-    F->nwords = i;
-    F->latest = (i > 0) ? &F->dict[i - 1] : NULL;
+    Word *w = F->latest;
+    int n = F->nwords;
+    while (w && strcmp(w->name, name) != 0) { w = w->link; n--; }
+    if (!w) throw_error(F, "? FORGET");
+    /* release the removed nodes' owned strings (arena memory is reclaimed
+       administratively; the Word structs are simply dropped from the list) */
+    for (Word *d = F->latest; d != w; d = d->link) { free(d->irbody); free(d->src); }
+    free(w->irbody);
+    free(w->src);
+    F->latest = w->link;
+    F->nwords = n - 1;
 }
 
 /* ---- compiler kit ----------------------------------------------------- */
 static void p_compile_comma(struct forth *F) { Word *w = (Word *)pop(F); compile_xt(F, w); }
+static void p_code_comma(struct forth *F) { emit(F, pop(F)); }
 
 /* ---- WORDS / SEE (kept in C: iteration + formatting) ------------------ */
 static void p_words(struct forth *F) {
@@ -828,16 +1001,20 @@ static void p_bracket_then(struct forth *F) { (void)F; /* no-op */ }
 /* ===================================================================== */
 /*  tokenizer                                                            */
 /* ===================================================================== */
-static int next_token(struct forth *F, char *out) {
+static int next_token_n(struct forth *F, char *out, int cap) {
     while (*F->inbuf_ptr && isspace((unsigned char)*F->inbuf_ptr)) F->inbuf_ptr++;
     if (!*F->inbuf_ptr) return 0;
     int n = 0;
     while (*F->inbuf_ptr && !isspace((unsigned char)*F->inbuf_ptr)) {
-        if (n < NAME_LEN - 1) out[n++] = *F->inbuf_ptr;
+        if (n < cap - 1) out[n++] = *F->inbuf_ptr;
         F->inbuf_ptr++;
     }
     out[n] = 0;
     return 1;
+}
+
+static int next_token(struct forth *F, char *out) {
+    return next_token_n(F, out, NAME_LEN);
 }
 
 static int parse_number(const char *s, cell *out) {
@@ -854,14 +1031,22 @@ static int parse_number(const char *s, cell *out) {
     return 1;
 }
 
+static int parse_float(const char *s, cell *out) {
+    if (!strpbrk(s, ".eE")) return 0;          /* integer forms handled elsewhere */
+    char *end;
+    double d = strtod(s, &end);
+    if (end == s || *end != 0) return 0;
+    memcpy(out, &d, sizeof d);
+    return 1;
+}
+
 /* ===================================================================== */
 /*  execution                                                            */
 /* ===================================================================== */
 
 /* run a colon word on the shared VM until it returns */
 static void run_colon(struct forth *F, Word *w) {
-    if (F->rp >= STACK_SIZE) { raise(F, ERR_RSTK, "return stack overflow"); }
-    F->rstack[F->rp++] = -1;          /* sentinel: end of outer frame */
+    rpush(F, -1);          /* sentinel: end of outer frame */
     F->ip = w->body;
     while (F->ip >= 0) {
         Word *x = (Word *)F->fcode[F->ip++];
@@ -871,8 +1056,7 @@ static void run_colon(struct forth *F, Word *w) {
 }
 
 static void p_docol(struct forth *F) {
-    if (F->rp >= STACK_SIZE) { raise(F, ERR_RSTK, "return stack overflow"); }
-    F->rstack[F->rp++] = F->ip;
+    rpush(F, F->ip);
     F->ip = F->curr->body;
 }
 
@@ -1066,6 +1250,11 @@ static void interpret_token(struct forth *F, const char *tok) {
     }
     cell v;
     if (parse_number(tok, &v)) {
+        if (F->state == 1) { compile_xt(F, F->W_LIT); emit(F, v); }
+        else push(F, v);
+        return;
+    }
+    if (parse_float(tok, &v)) {
         if (F->state == 1) { compile_xt(F, F->W_LIT); emit(F, v); }
         else push(F, v);
         return;
@@ -1501,7 +1690,7 @@ static void parse_operand(struct forth *F, const char *tok, sljit_s32 *para, slj
             void *pv = NULL;
             if      (strcmp(sym, "dstack") == 0) pv = F->dstack;
             else if (strcmp(sym, "rstack") == 0) pv = F->rstack;
-            else if (strcmp(sym, "mem") == 0)    pv = F->mem;
+            else if (strcmp(sym, "mem") == 0)    pv = F->data.base;
             else if (strcmp(sym, "sp") == 0)     pv = &F->sp;
             else if (strcmp(sym, "rp") == 0)     pv = &F->rp;
             else if (strcmp(sym, "memtop") == 0) pv = &F->memtop;
@@ -1528,14 +1717,13 @@ static void parse_operand(struct forth *F, const char *tok, sljit_s32 *para, slj
             else if (strcmp(sym, "forth_native_p") == 0) pv = (void *)(intptr_t)forth_native_p;
             else if (strcmp(sym, "forth_variable_p") == 0) pv = (void *)(intptr_t)forth_variable_p;
             /* interpreter / compiler state */
-            else if (strcmp(sym, "code") == 0) pv = (void *)F->fcode;
+            else if (strcmp(sym, "code") == 0) pv = &F->fcode;
             else if (strcmp(sym, "here") == 0) pv = &F->here;
             else if (strcmp(sym, "ip") == 0) pv = &F->ip;
             else if (strcmp(sym, "state") == 0) pv = &F->state;
             else if (strcmp(sym, "compiling") == 0) pv = &F->compiling;
             else if (strcmp(sym, "latest") == 0) pv = &F->latest;
             else if (strcmp(sym, "nwords") == 0) pv = &F->nwords;
-            else if (strcmp(sym, "dict") == 0) pv = (void *)F->dict;
             if (pv) { *para = SLJIT_IMM; *w = (sljit_sw)(intptr_t)pv; return; }
         }
         void *a = NULL;
@@ -2404,8 +2592,8 @@ static void p_squote(struct forth *F) {
     int n = (int)strlen(slot);
     if (F->state == 1) {
         int cells = (n + (int)sizeof(cell)) / (int)sizeof(cell);
-        if (F->memtop + cells > MEM_SIZE) throw_error(F, "data space full");
-        char *dst = (char *)F->mem + (size_t)F->memtop * sizeof(cell);
+        if (!region_ensure(&F->data, (size_t)(F->memtop + cells) * sizeof(cell))) throw_error(F, "data space out of memory");
+        char *dst = (char *)F->data.base + (size_t)F->memtop * sizeof(cell);
         memcpy(dst, slot, (size_t)n);
         cell a = (cell)(intptr_t)dst;
         F->memtop += cells;
@@ -2546,8 +2734,8 @@ static void p_abortq(struct forth *F) {
 /* store a string in data space and compile (lit addr)(lit len)( word ) */
 static void compile_inline_string(struct forth *F, const char *s, int n, Word *emitword) {
     int cells = (n + (int)sizeof(cell)) / (int)sizeof(cell);
-    if (F->memtop + cells > MEM_SIZE) throw_error(F, "data space full");
-    char *dst = (char *)F->mem + (size_t)F->memtop * sizeof(cell);
+    if (!region_ensure(&F->data, (size_t)(F->memtop + cells) * sizeof(cell))) throw_error(F, "data space out of memory");
+    char *dst = (char *)F->data.base + (size_t)F->memtop * sizeof(cell);
     memcpy(dst, s, (size_t)n);
     cell a = (cell)(intptr_t)dst;
     F->memtop += cells;
@@ -2651,7 +2839,7 @@ static void p_native(struct forth *F) {
     Nat fn = (Nat)F->curr->native;
     cell *r = fn(F->dstack + F->sp);
     ptrdiff_t n = r - F->dstack;
-    if (n < 0 || n > STACK_SIZE) throw_error(F, "native stack error");
+    if (n < 0 || (size_t)n > F->dstack_r.reserved / sizeof(cell)) throw_error(F, "native stack error");
     F->sp = (int)n;
 }
 
@@ -2682,12 +2870,41 @@ static void init_dict(struct forth *F) {
 
     /* memory / dictionary */
     define_prim(F, "CREATE", p_create);
+    define_prim(F, ",", p_comma);
+    define_prim(F, "ALLOT", p_allot);
     def_imm(F, "DOES>", p_does_quote);
     define_prim(F, "JIT", p_jit);
     define_prim(F, "JIT-ALL", p_jit_all);
     define_prim(F, "WORDS", p_words);
     define_prim(F, "SEE", p_see);
     /* strings / byte memory live in the native prelude */
+
+    /* heap */
+    define_prim(F, "MALLOC", p_malloc);
+    define_prim(F, "REALLOC", p_realloc);
+    define_prim(F, "FREE", p_free);
+    define_prim(F, "ALLOC", p_alloc);
+    define_prim(F, "ARENA-RESET", p_arena_reset);
+    define_prim(F, "READ-LINE", p_read_line);
+
+    /* floating point */
+    define_prim(F, "S>F", p_s2f);
+    define_prim(F, "F>S", p_f2s);
+    define_prim(F, "F+", p_fadd);
+    define_prim(F, "F-", p_fsub);
+    define_prim(F, "F*", p_fmul);
+    define_prim(F, "F/", p_fdiv);
+    define_prim(F, "FNEGATE", p_fneg);
+    define_prim(F, "FABS", p_fabs);
+    define_prim(F, "FSQRT", p_fsqrt);
+    define_prim(F, "F<", p_flt);
+    define_prim(F, "F>", p_fgt);
+    define_prim(F, "F=", p_feq);
+    define_prim(F, "FDUP", p_fdup);
+    define_prim(F, "FDROP", p_fdrop);
+    define_prim(F, "FSWAP", p_fswap);
+    define_prim(F, "FOVER", p_fover);
+    define_prim(F, "F.", p_fdot);
 
     /* compiler */
     def_imm(F, ":", p_colon);
@@ -2705,6 +2922,7 @@ static void init_dict(struct forth *F) {
     def_imm(F, "[COMPILE]", p_bracket_compile);
     define_prim(F, "IMMEDIATE", p_immediate);
     define_prim(F, "COMPILE,", p_compile_comma);
+    define_prim(F, "CODE,", p_code_comma);
     F->W_LOCAL       = define_prim(F, "(local)",       p_local);
     F->W_LOCAL_STORE = define_prim(F, "(local!)",      p_local_store);
     F->W_LOCALS_ENTER = define_prim(F, "(locals-enter)", p_locals_enter);
@@ -2742,6 +2960,8 @@ static void init_dict(struct forth *F) {
     define_prim(F, "DLCLOSE", p_dlclose);
     define_prim(F, "DLERROR", p_dlerror);
     define_prim(F, "DLLIBS", p_dllibs);
+    define_prim(F, "INCLUDE", p_include);
+    define_prim(F, "REQUIRE", p_require);
     define_prim(F, "SET-JUMP-ADDR", p_set_jump_addr);
     define_prim(F, "SET-CONST", p_set_const);
     define_prim(F, "CPU-FEATURE?", p_cpu_feature);
@@ -2801,6 +3021,74 @@ static void run_file(struct forth *F, const char *path) {
     fclose(f);
 }
 
+/* locate a library file: as given, under lib/, or in $FORTH_PATH */
+static FILE *open_lib(struct forth *F, const char *name) {
+    (void)F;
+    FILE *f = fopen(name, "r");
+    if (f) return f;
+    char buf[512];
+    snprintf(buf, sizeof buf, "lib/%s", name);
+    f = fopen(buf, "r");
+    if (f) return f;
+    const char *path = getenv("FORTH_PATH");
+    if (!path) return NULL;
+    for (const char *p = path; *p; ) {
+        const char *sep = strchr(p, ':');
+        size_t n = sep ? (size_t)(sep - p) : strlen(p);
+        if (n && n + strlen(name) + 2 < sizeof buf) {
+            memcpy(buf, p, n);
+            buf[n] = '/';
+            strcpy(buf + n + 1, name);
+            f = fopen(buf, "r");
+            if (f) return f;
+        }
+        if (!sep) break;
+        p = sep + 1;
+    }
+    return NULL;
+}
+
+/* evaluate a file line by line, preserving the caller's input state */
+static void include_file(struct forth *F, const char *name) {
+    FILE *f = open_lib(F, name);
+    if (!f) throw_error(F, "cannot open file");
+    char saved[4096];
+    memcpy(saved, F->inbuf, sizeof saved);
+    char *sptr = F->inbuf_ptr;
+    int sabort = F->abort_active;
+    char line[4096];
+    while (fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        if (n >= sizeof F->inbuf) n = sizeof F->inbuf - 1;
+        memcpy(F->inbuf, line, n);
+        F->inbuf[n] = 0;
+        run_line(F);
+    }
+    fclose(f);
+    memcpy(F->inbuf, saved, sizeof saved);
+    F->inbuf_ptr = sptr;
+    F->abort_active = sabort;
+}
+
+static void p_include(struct forth *F) {
+    char name[256];
+    if (!next_token_n(F, name, sizeof name)) throw_error(F, "INCLUDE needs a file name");
+    include_file(F, name);
+}
+
+static void p_require(struct forth *F) {
+    char name[256];
+    if (!next_token_n(F, name, sizeof name)) throw_error(F, "REQUIRE needs a file name");
+    for (int i = 0; i < F->nloaded; i++)
+        if (strcmp(F->loaded[i], name) == 0) return;
+    include_file(F, name);
+    if (F->nloaded < MAX_LOADED) {
+        strncpy(F->loaded[F->nloaded], name, sizeof F->loaded[0] - 1);
+        F->loaded[F->nloaded][sizeof F->loaded[0] - 1] = 0;
+        F->nloaded++;
+    }
+}
+
 /* Decompress and evaluate the embedded native prelude before the REPL. */
 static void run_prelude(struct forth *F) {
     const char *off = getenv("FORTH_NO_PRELUDE");
@@ -2832,25 +3120,75 @@ static void run_prelude(struct forth *F) {
     free(raw);
 }
 
+static void eval_line(struct forth *F, const char *s) {
+    size_t n = strlen(s);
+    if (n >= sizeof F->inbuf) n = sizeof F->inbuf - 1;
+    memcpy(F->inbuf, s, n);
+    F->inbuf[n] = 0;
+    run_line(F);
+}
+
 int main(int argc, char **argv) {
+    const char *file = NULL, *repl = NULL;
+    char reqs[8][256];
+    int nreq = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--require") == 0 && i + 1 < argc) {
+            if (nreq < 8) { snprintf(reqs[nreq], sizeof reqs[0], "%s", argv[++i]); nreq++; }
+        } else if (strcmp(argv[i], "--repl") == 0 && i + 1 < argc) {
+            repl = argv[++i];
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            fputs("usage: forth [--require FILE]... [--repl WORD] [FILE]\n", stdout);
+            return 0;
+        } else {
+            file = argv[i];
+        }
+    }
+
     struct forth *F = calloc(1, sizeof *F);
     if (!F) { fputs("cannot allocate interpreter state\n", stderr); return 1; }
+    arena_init(&F->heap, 1u << 20);
+    arena_init(&F->words, 1u << 20);
+    if (!region_init(&F->data, (size_t)1 << 30) ||
+        !region_init(&F->dstack_r, STACK_RESERVE) ||
+        !region_init(&F->rstack_r, STACK_RESERVE)) {
+        fputs("cannot reserve memory regions\n", stderr);
+        return 1;
+    }
+    F->dstack = (cell *)F->dstack_r.base;
+    F->rstack = (cell *)F->rstack_r.base;
 
     F->inbuf_ptr = F->inbuf;
     init_dict(F);
     run_prelude(F);
 
-    if (argc > 1) run_file(F, argv[1]);
+    for (int i = 0; i < nreq; i++) {
+        char b[512];
+        snprintf(b, sizeof b, "REQUIRE %.250s", reqs[i]);
+        eval_line(F, b);
+    }
+    if (file) run_file(F, file);
 
-    for (;;) {
-        fputs("> ", stdout);
-        fflush(stdout);
-        if (!fgets(F->inbuf, sizeof F->inbuf, stdin)) break;
-        run_line(F);
+    if (repl) {
+        eval_line(F, repl);
+    } else {
+        for (;;) {
+            fputs("> ", stdout);
+            fflush(stdout);
+            if (!fgets(F->inbuf, sizeof F->inbuf, stdin)) break;
+            run_line(F);
+        }
     }
 
     for (int i = 0; i < F->njit; i++) sljit_free_code(F->jit_codes[i], NULL);
-    for (int i = 0; i < F->nwords; i++) { free(F->dict[i].irbody); free(F->dict[i].src); }
+    for (Word *w = F->latest; w; w = w->link) { free(w->irbody); free(w->src); }
+    free(F->fcode);
+    arena_destroy(&F->heap);
+    arena_destroy(&F->words);
+    region_destroy(&F->data);
+    region_destroy(&F->dstack_r);
+    region_destroy(&F->rstack_r);
     dyn_close_all(F);
     free(F);
     return 0;
