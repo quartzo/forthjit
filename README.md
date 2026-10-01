@@ -544,6 +544,7 @@ select <cond> dst, a, b             conditional move
 jmp @label
 ret [src]                           ret S1 returns the stack pointer
 nop       int3
+spush <reg|#imm>   spop <reg>   sdrop [#n]      data-stack sugar (S1; no mem operand)
 ```
 
 ### Expanded SLJIT surface

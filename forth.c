@@ -2171,6 +2171,36 @@ static void ir_instruction(struct forth *F, const char *m) {
     }
     if (strcmp(m, "nop") == 0)  { ensure_enter(F); sljit_emit_op0(F->jcomp, SLJIT_NOP); return; }
     if (strcmp(m, "int3") == 0) { ensure_enter(F); sljit_emit_op0(F->jcomp, SLJIT_BREAKPOINT); return; }
+    if (strcmp(m, "spush") == 0) {
+        /* push a register or immediate onto the data stack: [S1] = src; S1 += 8 */
+        ensure_enter(F);
+        sljit_s32 s; sljit_sw sw;
+        parse_operand(F, ir_need(F), &s, &sw);
+        if (s & SLJIT_MEM) throw_error(F, "spush: operand must be a register or immediate");
+        sljit_emit_op1(F->jcomp, SLJIT_MOV, SLJIT_MEM1(SLJIT_S1), 0, s, sw);
+        sljit_emit_op2(F->jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, (sljit_sw)sizeof(cell));
+        return;
+    }
+    if (strcmp(m, "spop") == 0) {
+        /* pop the top of the data stack into a register: S1 -= 8; dst = [S1] */
+        ensure_enter(F);
+        sljit_s32 d; sljit_sw dw;
+        parse_operand(F, ir_need(F), &d, &dw);
+        if ((d & SLJIT_MEM) || d == SLJIT_IMM) throw_error(F, "spop: operand must be a register");
+        sljit_emit_op2(F->jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, -(sljit_sw)sizeof(cell));
+        sljit_emit_op1(F->jcomp, SLJIT_MOV, d, dw, SLJIT_MEM1(SLJIT_S1), 0);
+        return;
+    }
+    if (strcmp(m, "sdrop") == 0) {
+        /* drop one cell (or #n cells) from the data stack: S1 -= 8 * n */
+        ensure_enter(F);
+        sljit_sw n = 1;
+        if (F->irtok_pos < F->irtok_count && F->irtok[F->irtok_pos][0] == '#')
+            n = (sljit_sw)strtol(ir_need(F) + 1, NULL, 0);
+        if (n < 0) throw_error(F, "sdrop: count must be >= 0");
+        if (n) sljit_emit_op2(F->jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, -(sljit_sw)sizeof(cell) * n);
+        return;
+    }
 
     sljit_s32 op;
     if ((op = op1_lookup(m)) != 0) {

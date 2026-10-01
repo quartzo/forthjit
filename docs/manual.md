@@ -755,6 +755,19 @@ nop
 int3
 ```
 
+### Data stack
+
+`spush`/`spop`/`sdrop` are sugar for the Forth data stack (through the working
+pointer `S1`). They accept a register or an immediate, **never a memory
+operand**, so no hidden scratch register is used. They are unrelated to
+`asm.push`/`asm.pop`, which use the hardware stack pointer.
+
+```
+spush <reg|#imm>    [S1] = src ; S1 += 8       push a cell onto the data stack
+spop  <reg>         S1 -= 8 ; dst = [S1]       pop a cell into a register
+sdrop [#n]          S1 -= 8 * n                drop n cells (default 1)
+```
+
 ### Comparisons, flags and selects
 
 ```

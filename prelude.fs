@@ -7,33 +7,27 @@ CODE DUP
   require 1
   room 1
   mov R0, [S1-8]
-  mov [S1], R0
-  add S1, S1, #8
-  mov R0, S1
+  spush R0
 ;CODE
 
 CODE DROP
   require 1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE SWAP
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
-  mov [S1-8], R1
-  mov [S1-16], R0
-  mov R0, S1
+  spop R0
+  spop R1
+  spush R0
+  spush R1
 ;CODE
 
 CODE OVER
   require 2
   room 1
   mov R0, [S1-16]
-  mov [S1], R0
-  add S1, S1, #8
-  mov R0, S1
+  spush R0
 ;CODE
 
 CODE NIP
@@ -41,7 +35,6 @@ CODE NIP
   mov R0, [S1-8]
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE TUCK
@@ -53,7 +46,6 @@ CODE TUCK
   mov [S1-8], R1
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE ROT
@@ -64,7 +56,6 @@ CODE ROT
   mov [S1-24], R1
   mov [S1-16], R0
   mov [S1-8], R2
-  mov R0, S1
 ;CODE
 
 CODE 2DUP
@@ -88,7 +79,6 @@ CODE +
   add R0, R0, [S1-16]
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE -
@@ -98,7 +88,6 @@ CODE -
   sub R1, R1, R0
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE *
@@ -107,7 +96,6 @@ CODE *
   mul R0, R0, [S1-16]
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 \ ---- arithmetic / logic --------------------------------------------------
@@ -117,7 +105,6 @@ CODE NEGATE
   mov R0, [S1-8]
   neg R0, R0
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE ABS
@@ -127,7 +114,6 @@ CODE ABS
   neg R0, R0
 label: done
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE 1+
@@ -135,7 +121,6 @@ CODE 1+
   mov R0, [S1-8]
   add R0, R0, #1
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE 1-
@@ -143,7 +128,6 @@ CODE 1-
   mov R0, [S1-8]
   add R0, R0, #-1
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE MIN
@@ -153,12 +137,10 @@ CODE MIN
   cmp lt R0, R1, @b_smaller
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
   ret S1
 label: b_smaller
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE MAX
@@ -168,12 +150,10 @@ CODE MAX
   cmp gt R0, R1, @b_bigger
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
   ret S1
 label: b_bigger
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE AND
@@ -182,7 +162,6 @@ CODE AND
   and R0, R0, [S1-16]
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE OR
@@ -191,7 +170,6 @@ CODE OR
   or R0, R0, [S1-16]
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE XOR
@@ -200,7 +178,6 @@ CODE XOR
   xor R0, R0, [S1-16]
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE INVERT
@@ -208,7 +185,6 @@ CODE INVERT
   mov R0, [S1-8]
   not R0, R0
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE LSHIFT
@@ -218,7 +194,6 @@ CODE LSHIFT
   shl R1, R1, R0
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE RSHIFT
@@ -228,7 +203,6 @@ CODE RSHIFT
   lshr R1, R1, R0
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 \ ---- comparisons (-1 / 0) ------------------------------------------------
@@ -242,7 +216,6 @@ CODE =
   neg R1, R1
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE <>
@@ -254,7 +227,6 @@ CODE <>
   neg R1, R1
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE <
@@ -266,7 +238,6 @@ CODE <
   neg R1, R1
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE >
@@ -278,7 +249,6 @@ CODE >
   neg R1, R1
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE <=
@@ -290,7 +260,6 @@ CODE <=
   neg R1, R1
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE >=
@@ -302,7 +271,6 @@ CODE >=
   neg R1, R1
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE 0=
@@ -312,7 +280,6 @@ CODE 0=
   flags eq R0
   neg R0, R0
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE 0<
@@ -322,7 +289,6 @@ CODE 0<
   flags lt R0
   neg R0, R0
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE 0>
@@ -332,7 +298,6 @@ CODE 0>
   flags gt R0
   neg R0, R0
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 \ ---- misc ---------------------------------------------------------------
@@ -345,7 +310,6 @@ CODE ?DUP
   mov [S1], R0
   add S1, S1, #8
 label: done
-  mov R0, S1
 ;CODE
 
 CODE @
@@ -353,7 +317,6 @@ CODE @
   mov R0, [S1-8]
   mov R1, [R0]
   mov [S1-8], R1
-  mov R0, S1
 ;CODE
 
 CODE !
@@ -362,7 +325,6 @@ CODE !
   mov R1, [S1-16]
   mov [R0], R1
   add S1, S1, #-16
-  mov R0, S1
 ;CODE
 
 \ ---- output -------------------------------------------------------------
@@ -373,7 +335,6 @@ CODE EMIT
   add S1, S1, #-8
   sig W 32
   icall &putchar
-  mov R0, S1
 ;CODE
 
 CODE CR
@@ -381,7 +342,6 @@ CODE CR
   mov R0, #10
   sig W 32
   icall &putchar
-  mov R0, S1
 ;CODE
 
 \ ---- data space / depth --------------------------------------------------
@@ -395,7 +355,6 @@ CODE DEPTH
   lshr R1, R1, #3
   mov [S1], R1
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 \ `,` and `ALLOT` are C primitives over the reserved data region.
@@ -411,7 +370,6 @@ CODE CODE@
   add R1, R1, R0
   mov R0, [R1]
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE CODE!
@@ -424,7 +382,6 @@ CODE CODE!
   add R2, R2, R0
   mov [R2], R1
   add S1, S1, #-16
-  mov R0, S1
 ;CODE
 
 CODE HERE
@@ -434,7 +391,6 @@ CODE HERE
   mov R0, [R0]
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE STATE
@@ -443,7 +399,6 @@ CODE STATE
   mov R0, &state
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 \ ---- compiler kit: control flow and defining words in Forth --------------
@@ -521,7 +476,6 @@ CODE /
   op0 SLJIT_DIVMOD_SW
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
   ret S1
 label: zero
   sig V
@@ -537,7 +491,6 @@ CODE MOD
   op0 SLJIT_DIVMOD_SW
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
   ret S1
 label: zero
   sig V
@@ -558,7 +511,6 @@ CODE I
   mov R1, [R2]
   mov [S1], R1
   add S1, S1, #8
-  mov R0, S1
   ret S1
 label: bad
   mov R0, #-256
@@ -580,7 +532,6 @@ CODE J
   mov R1, [R2]
   mov [S1], R1
   add S1, S1, #8
-  mov R0, S1
   ret S1
 label: bad
   mov R0, #-256
@@ -600,7 +551,6 @@ CODE LATEST
   icall &forth_latest
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE >LINK
@@ -609,7 +559,6 @@ CODE >LINK
   sig P P
   icall &forth_link
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE >NAME
@@ -625,7 +574,6 @@ CODE >NAME
   mov [S1-8], S0
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE WORD-DATA
@@ -634,7 +582,6 @@ CODE WORD-DATA
   sig W P
   icall &forth_data
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE >BODY
@@ -643,7 +590,6 @@ CODE >BODY
   sig P P
   icall &forth_body
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE IMMEDIATE?
@@ -652,7 +598,6 @@ CODE IMMEDIATE?
   sig W P
   icall &forth_immediate
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE HIDDEN?
@@ -661,7 +606,6 @@ CODE HIDDEN?
   sig W P
   icall &forth_hidden
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE COLON?
@@ -670,7 +614,6 @@ CODE COLON?
   sig W P
   icall &forth_colon_p
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE NATIVE?
@@ -679,7 +622,6 @@ CODE NATIVE?
   sig W P
   icall &forth_native_p
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE VARIABLE?
@@ -688,7 +630,6 @@ CODE VARIABLE?
   sig W P
   icall &forth_variable_p
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE FIND
@@ -699,7 +640,6 @@ CODE FIND
   icall &forth_find
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 \ ---- return stack, exit, stack addresses, string output -------------------
@@ -718,7 +658,6 @@ CODE >R
   add R1, R1, #1
   mov32 [R0], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 
 CODE R>
@@ -740,7 +679,6 @@ CODE R>
   mov R1, [R2]
   mov [S1], R1
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE R@
@@ -761,7 +699,6 @@ CODE R@
   mov R1, [R2]
   mov [S1], R1
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE 2>R
@@ -780,7 +717,6 @@ CODE 2>R
   add R1, R1, #2
   mov32 [R0], R1
   add S1, S1, #-16
-  mov R0, S1
 ;CODE
 
 CODE 2R>
@@ -804,7 +740,6 @@ CODE 2R>
   mov [S1], R1
   mov [S1+8], R3
   add S1, S1, #16
-  mov R0, S1
 ;CODE
 
 CODE EXIT
@@ -825,7 +760,6 @@ CODE EXIT
   mov R1, [R2]
   mov R2, &ip
   mov [R2], R1
-  mov R0, S1
 ;CODE
 
 CODE SP@
@@ -835,7 +769,6 @@ CODE SP@
   sub R0, R0, #8
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE SP!
@@ -860,7 +793,6 @@ CODE RP@
   add R2, R2, R1
   mov [S1], R2
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 
 CODE TYPE
@@ -870,7 +802,6 @@ CODE TYPE
   add S1, S1, #-16
   sig V P W
   icall &forth_type
-  mov R0, S1
 ;CODE
 
 \ ---- byte memory and strings ---------------------------------------------
@@ -880,7 +811,6 @@ CODE C@
   mov R0, [S1-8]
   mov.u8 R0, [R0]
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 CODE C!
@@ -889,7 +819,6 @@ CODE C!
   mov R1, [S1-16]
   mov.u8 [R0], R1
   add S1, S1, #-16
-  mov R0, S1
 ;CODE
 
 : FILL      { a u ch -- }  u 0 ?DO ch a I + C! LOOP ;
@@ -964,7 +893,6 @@ CODE PICK
   sub R1, R1, R0
   mov R2, [R1]
   mov [S1-8], R2
-  mov R0, S1
 ;CODE
 
 : SPACE 32 EMIT ;
@@ -1007,7 +935,6 @@ CODE UNLOOP
   mov.u32 R1, [R0]
   add R1, R1, #-2
   mov32 [R0], R1
-  mov R0, S1
 ;CODE
 
 \ ---- tooling -------------------------------------------------------------
@@ -1018,7 +945,6 @@ CODE NATIVE>
   sig P P
   icall &forth_native
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 
 : JIT? ( xt -- flag )  DUP COLON? SWAP NATIVE? AND ;

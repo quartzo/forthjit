@@ -35,9 +35,29 @@ CODE loc locals 16
   mov R1, [SP+0]
   mov [S1], R1
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 loc . CR               \ 10
+
+\ stack sugar: spush / spop / sdrop
+CODE sswap ( a b -- b a )
+  require 2
+  spop R0
+  spop R1
+  spush R0
+  spush R1
+;CODE
+10 20 sswap . . CR     \ 10 20
+
+CODE simm ( -- 7 123 )
+  spush #123
+  spush #7
+;CODE
+simm . . CR            \ 7 123
+
+CODE sdrop2 ( a b c -- a )
+  sdrop #2
+;CODE
+1 2 3 sdrop2 . CR      \ 1
 
 \ IR fragment embedded in CODE
 CODE add5
@@ -46,7 +66,6 @@ CODE add5
   add R0, R0, #5
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 10 add5 . CR           \ 15
 
@@ -64,7 +83,6 @@ CODE pc
   icall R2
   mov [S1], R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 67 C-PUTCHAR pc . CR   \ C67
 
@@ -75,7 +93,6 @@ CODE gsub
   op2 SLJIT_SUB R0 R1 R0
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 10 3 gsub . CR         \ 7
 
@@ -110,7 +127,6 @@ CODE iszero
   setflags zero R0, #0
   flags SLJIT_ZERO R0
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 0 iszero . CR                \ 1
 7 iszero . CR                \ 0
@@ -118,7 +134,6 @@ CODE iszero
 \ raw instruction bytes
 CODE raw
   custom 1 0x90
-  mov R0, S1
 ;CODE
 raw .S CR
 
@@ -132,7 +147,6 @@ CODE fadd
   fcopy SLJIT_COPY_FROM_F64 F0, R0
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 $3ff8000000000000 $4002000000000000 fadd . CR   \ 0x400e000000000000 = 3.75
 
@@ -141,7 +155,6 @@ CODE cval
   rwconst K SLJIT_MOV R0, #0
   mov [S1] R0
   add S1, S1, #8
-  mov R0, S1
 ;CODE
 cval . CR                    \ 0
 S" K" 123 SET-CONST
@@ -156,7 +169,6 @@ CODE min2
 label: keep
   mov [S1-16], R1
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 CODE min4
   inline min2
@@ -197,7 +209,6 @@ CODE nthrow
   mov R0, #99
   sig V W
   icall &forth_raise
-  mov R0, S1
 ;CODE
 ' nthrow CATCH . CR          \ 99
 
@@ -222,7 +233,6 @@ CODE nfind
   icall &forth_find
   mov [S1-16], R0
   add S1, S1, #-8
-  mov R0, S1
 ;CODE
 S" DUP" nfind ' DUP = . CR    \ -1
 
@@ -243,7 +253,6 @@ CODE printf1
   add S1, S1, #-16
   asm.mov.al 0
   asm.call R3
-  mov R0, S1
 ;CODE
 S" value=%ld" DROP 42 printf1 CR   \ value=42
 CODE rawdemo
@@ -259,7 +268,6 @@ CODE cadd ( n -- n+100 )
   mov R0, [S1-8]   \ TOS
   add R0, R0, #100 ( plus 100 )
   mov [S1-8], R0
-  mov R0, S1
 ;CODE
 5 cadd . CR          \ 105
 
