@@ -498,9 +498,9 @@ line and `( ... )`) are ignored inside a `CODE` body.
 
 ```
 CODE sq
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mul R0, R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 5 sq . CR            \ 25
 ```
@@ -511,7 +511,7 @@ CODE sq
 
 - argument `S0` is a pointer just past the top of the data stack;
 - the prologue copies it to `S1`, the working stack pointer;
-- `TOS = [S1-8]`; pushing writes `[S1]` and does `S1 += 8`;
+- `TOS = [S1-1c]`; pushing writes `[S1]` and does `S1 += 8`;
 - the epilogue returns the new `S1` in `R0` (`ret S1`).
 
 `R0..R3` and `S0..S1` are available. `locals N` as the first line (before any
@@ -525,7 +525,8 @@ instruction) reserves `N` bytes of local stack, addressed as `[SP+off]`.
 | `F0`..`F9`, `FS0`..`FS9` | float registers |
 | `V0`..`V9`, `VS0`..`VS9` | vector registers |
 | `#123`, `#0x1f` | immediate |
-| `[R1]`, `[R1+8]`, `[S0-16]` | base + offset |
+| `[R1]`, `[R1+8]`, `[S0-16]` | base + offset (bytes) |
+| `[S1-1c]`, `[R2+1c]`, `[S1-3c]` | base + offset in cells (`c` = `sizeof(cell)`) |
 | `[R1+R2<<3]` | indexed (shift 0..3) |
 | `[#123]` | absolute address |
 | `&name`, `&lib::name` | resolved symbol / native word |
@@ -607,8 +608,8 @@ the arguments in ABI registers yourself and set `AL` last:
 ```
 CODE printf1 ( fmt value -- )
   mov R3, &printf        \ function address in RCX
-  mov R2, [S1-16]        \ format  -> RDI
-  mov R1, [S1-8]         \ value   -> RSI
+  mov R2, [S1-2c]        \ format  -> RDI
+  mov R1, [S1-1c]         \ value   -> RSI
   add S1, S1, #-16
   asm.mov.al 0           \ AL = 0 vector registers
   asm.call R3
@@ -645,7 +646,7 @@ compiles it (raw, no injected prologue or epilogue) and returns the code
 pointer. `NATIVE` turns that pointer into a named word:
 
 ```
-S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-8] add R0 R0 #100 mov [S1-8] R0 ret S1"
+S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-1c] add R0 R0 #100 mov [S1-1c] R0 ret S1"
    ASSEMBLE NATIVE plus100
 7 plus100 . CR        \ 107
 ```
@@ -667,7 +668,7 @@ which matches the C call convention. For example:
 
 ```
 CODE OVER
-  mov R0, [S1-16]
+  mov R0, [S1-2c]
   mov [S1], R0
   add S1, S1, #8
   mov R0, S1
@@ -750,11 +751,11 @@ For example:
 
 ```
 CODE nfind
-  mov R0, [S1-16]
-  mov R1, [S1-8]
+  mov R0, [S1-2c]
+  mov R1, [S1-1c]
   sig P P 32
   icall &forth_find
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
   mov R0, S1
 ;CODE
@@ -774,11 +775,11 @@ library registry and is usable anywhere an operand is expected:
 
 ```
 CODE slen
-  mov R0, [S1-16]
+  mov R0, [S1-2c]
   sig W P
   icall &strlen            \ libc symbol, global scope
   add S1, S1, #-8
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 S" hello world" slen . CR  \ 11
 

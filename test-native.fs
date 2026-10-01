@@ -2,9 +2,9 @@
 
 \ square via LIR
 CODE sq
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mul R0, R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 5 sq . CR              \ 25
 
@@ -14,14 +14,14 @@ CODE sq
 
 \ labels, signed comparison and conditional jump
 CODE nmax
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   cmp gt R1, R0, @big
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
   ret S1
 label: big
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
   ret S1
 ;CODE
@@ -70,13 +70,13 @@ CODE add5
 10 add5 . CR           \ 15
 
 \ raw IR string -> code pointer -> named native word
-S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-8] add R0 R0 #100 mov [S1-8] R0 ret S1" ASSEMBLE NATIVE plus100
+S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-1c] add R0 R0 #100 mov [S1-1c] R0 ret S1" ASSEMBLE NATIVE plus100
 7 plus100 . CR         \ 107
 
 \ icall to libc putchar: ( arg fn -- ret )
 CODE pc
-  mov R2, [S1-8]
-  mov R1, [S1-16]
+  mov R2, [S1-1c]
+  mov R1, [S1-2c]
   add S1, S1, #-16
   mov R0, R1
   sig W 32
@@ -88,21 +88,21 @@ CODE pc
 
 \ generic escape hatch: op2 with a named SLJIT opcode (a - b)
 CODE gsub
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   op2 SLJIT_SUB R0 R1 R0
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 10 3 gsub . CR         \ 7
 
 \ dynamic linking: call libc strlen via &name
 CODE slen
-  mov R0, [S1-16]
+  mov R0, [S1-2c]
   sig W P
   icall &strlen
   add S1, S1, #-8
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 S" hello world" slen . CR   \ 11
 
@@ -123,10 +123,10 @@ S" libc.so.6" DLOPEN S" getpid" DLSYM . CR
 
 \ flags: materialize a comparison as 0/1
 CODE iszero
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   setflags zero R0, #0
   flags SLJIT_ZERO R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 0 iszero . CR                \ 1
 7 iszero . CR                \ 0
@@ -139,13 +139,13 @@ raw .S CR
 
 \ floating point: 1.5 + 2.25 = 3.75 (raw double bits)
 CODE fadd
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   fcopy SLJIT_COPY_TO_F64 F0, R0
   fcopy SLJIT_COPY_TO_F64 F1, R1
   fop2 SLJIT_ADD_F64 F0, F1, F0
   fcopy SLJIT_COPY_FROM_F64 F0, R0
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 $3ff8000000000000 $4002000000000000 fadd . CR   \ 0x400e000000000000 = 3.75
@@ -162,12 +162,12 @@ cval . CR                    \ 123
 
 \ inline (macro expansion, labels renamed)
 CODE min2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   cmp lt R1, R0, @keep
   mov R1, R0
 label: keep
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 CODE min4
@@ -227,11 +227,11 @@ VARIABLE v
 
 \ native CODE calling a dictionary helper directly
 CODE nfind
-  mov R0, [S1-16]
-  mov R1, [S1-8]
+  mov R0, [S1-2c]
+  mov R1, [S1-1c]
   sig P P 32
   icall &forth_find
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 S" DUP" nfind ' DUP = . CR    \ -1
@@ -248,8 +248,8 @@ CR
 ARCH . CR                    \ 1 on x86-64
 CODE printf1
   mov R3, &printf
-  mov R2, [S1-16]
-  mov R1, [S1-8]
+  mov R2, [S1-2c]
+  mov R1, [S1-1c]
   add S1, S1, #-16
   asm.mov.al 0
   asm.call R3
@@ -265,9 +265,9 @@ CR
 
 \ comments inside CODE bodies
 CODE cadd ( n -- n+100 )
-  mov R0, [S1-8]   \ TOS
+  mov R0, [S1-1c]   \ TOS
   add R0, R0, #100 ( plus 100 )
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 5 cadd . CR          \ 105
 

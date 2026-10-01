@@ -6,7 +6,7 @@
 CODE DUP
   require 1
   room 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   spush R0
 ;CODE
 
@@ -26,36 +26,36 @@ CODE SWAP
 CODE OVER
   require 2
   room 1
-  mov R0, [S1-16]
+  mov R0, [S1-2c]
   spush R0
 ;CODE
 
 CODE NIP
   require 2
-  mov R0, [S1-8]
-  mov [S1-16], R0
+  mov R0, [S1-1c]
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE TUCK
   require 2
   room 1
-  mov R0, [S1-8]
-  mov R1, [S1-16]
-  mov [S1-16], R0
-  mov [S1-8], R1
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
+  mov [S1-2c], R0
+  mov [S1-1c], R1
   mov [S1], R0
   add S1, S1, #8
 ;CODE
 
 CODE ROT
   require 3
-  mov R0, [S1-8]
-  mov R1, [S1-16]
-  mov R2, [S1-24]
-  mov [S1-24], R1
-  mov [S1-16], R0
-  mov [S1-8], R2
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
+  mov R2, [S1-3c]
+  mov [S1-3c], R1
+  mov [S1-2c], R0
+  mov [S1-1c], R2
 ;CODE
 
 CODE 2DUP
@@ -75,26 +75,26 @@ CODE 2DROP
 
 CODE +
   require 2
-  mov R0, [S1-8]
-  add R0, R0, [S1-16]
-  mov [S1-16], R0
+  mov R0, [S1-1c]
+  add R0, R0, [S1-2c]
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE -
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   sub R1, R1, R0
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE *
   require 2
-  mov R0, [S1-8]
-  mul R0, R0, [S1-16]
-  mov [S1-16], R0
+  mov R0, [S1-1c]
+  mul R0, R0, [S1-2c]
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
@@ -102,106 +102,106 @@ CODE *
 
 CODE NEGATE
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   neg R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE ABS
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   cmp ge R0, #0, @done
   neg R0, R0
 label: done
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE 1+
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   add R0, R0, #1
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE 1-
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   add R0, R0, #-1
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE MIN
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   cmp lt R0, R1, @b_smaller
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
   ret S1
 label: b_smaller
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE MAX
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   cmp gt R0, R1, @b_bigger
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
   ret S1
 label: b_bigger
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE AND
   require 2
-  mov R0, [S1-8]
-  and R0, R0, [S1-16]
-  mov [S1-16], R0
+  mov R0, [S1-1c]
+  and R0, R0, [S1-2c]
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE OR
   require 2
-  mov R0, [S1-8]
-  or R0, R0, [S1-16]
-  mov [S1-16], R0
+  mov R0, [S1-1c]
+  or R0, R0, [S1-2c]
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE XOR
   require 2
-  mov R0, [S1-8]
-  xor R0, R0, [S1-16]
-  mov [S1-16], R0
+  mov R0, [S1-1c]
+  xor R0, R0, [S1-2c]
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
 CODE INVERT
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   not R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE LSHIFT
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   shl R1, R1, R0
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE RSHIFT
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   lshr R1, R1, R0
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
@@ -209,95 +209,95 @@ CODE RSHIFT
 
 CODE =
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   setflags eq R1, R0
   flags eq R1
   neg R1, R1
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE <>
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   setflags ne R1, R0
   flags ne R1
   neg R1, R1
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE <
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   setflags lt R1, R0
   flags lt R1
   neg R1, R1
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE >
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   setflags gt R1, R0
   flags gt R1
   neg R1, R1
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE <=
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   setflags le R1, R0
   flags le R1
   neg R1, R1
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE >=
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   setflags ge R1, R0
   flags ge R1
   neg R1, R1
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
 ;CODE
 
 CODE 0=
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   setflags eq R0, #0
   flags eq R0
   neg R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE 0<
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   setflags lt R0, #0
   flags lt R0
   neg R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE 0>
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   setflags gt R0, #0
   flags gt R0
   neg R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 \ ---- misc ---------------------------------------------------------------
@@ -305,7 +305,7 @@ CODE 0>
 CODE ?DUP
   require 1
   room 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   cmp zero R0, #0, @done
   mov [S1], R0
   add S1, S1, #8
@@ -314,15 +314,15 @@ label: done
 
 CODE @
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mov R1, [R0]
-  mov [S1-8], R1
+  mov [S1-1c], R1
 ;CODE
 
 CODE !
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   mov [R0], R1
   add S1, S1, #-16
 ;CODE
@@ -331,7 +331,7 @@ CODE !
 
 CODE EMIT
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   add S1, S1, #-8
   sig W 32
   icall &putchar
@@ -363,19 +363,19 @@ CODE DEPTH
 
 CODE CODE@
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mov R1, &code
   mov R1, [R1]
   shl R0, R0, #3
   add R1, R1, R0
   mov R0, [R1]
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE CODE!
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   mov R2, &code
   mov R2, [R2]
   shl R0, R0, #3
@@ -469,12 +469,12 @@ CREATE LQDO 8 ALLOT
 
 CODE /
   require 2
-  mov R1, [S1-8]
+  mov R1, [S1-1c]
   cmp eq R1, #0, @zero
-  mov R0, [S1-16]
-  mov R1, [S1-8]
+  mov R0, [S1-2c]
+  mov R1, [S1-1c]
   op0 SLJIT_DIVMOD_SW
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
   ret S1
 label: zero
@@ -484,12 +484,12 @@ label: zero
 
 CODE MOD
   require 2
-  mov R1, [S1-8]
+  mov R1, [S1-1c]
   cmp eq R1, #0, @zero
-  mov R0, [S1-16]
-  mov R1, [S1-8]
+  mov R0, [S1-2c]
+  mov R1, [S1-1c]
   op0 SLJIT_DIVMOD_SW
-  mov [S1-16], R1
+  mov [S1-2c], R1
   add S1, S1, #-8
   ret S1
 label: zero
@@ -555,90 +555,90 @@ CODE LATEST
 
 CODE >LINK
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig P P
   icall &forth_link
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE >NAME
   require 1
   room 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig P P
   icall &forth_name
   mov S0, R0
   mov R0, S0
   sig W P
   icall &strlen
-  mov [S1-8], S0
+  mov [S1-1c], S0
   mov [S1], R0
   add S1, S1, #8
 ;CODE
 
 CODE WORD-DATA
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig W P
   icall &forth_data
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE >BODY
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig P P
   icall &forth_body
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE IMMEDIATE?
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig W P
   icall &forth_immediate
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE HIDDEN?
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig W P
   icall &forth_hidden
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE COLON?
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig W P
   icall &forth_colon_p
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE NATIVE?
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig W P
   icall &forth_native_p
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE VARIABLE?
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig W P
   icall &forth_variable_p
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE FIND
   require 2
-  mov R0, [S1-16]
-  mov R1, [S1-8]
+  mov R0, [S1-2c]
+  mov R1, [S1-1c]
   sig P P 32
   icall &forth_find
-  mov [S1-16], R0
+  mov [S1-2c], R0
   add S1, S1, #-8
 ;CODE
 
@@ -651,7 +651,7 @@ CODE >R
   mov R2, &rstack
   shl R1, R1, #3
   add R2, R2, R1
-  mov R1, [S1-8]
+  mov R1, [S1-1c]
   mov [R2], R1
   mov R0, &rp
   mov.u32 R1, [R0]
@@ -708,10 +708,10 @@ CODE 2>R
   shl R1, R1, #3
   mov R2, &rstack
   add R2, R2, R1
-  mov R1, [S1-16]
+  mov R1, [S1-2c]
   mov [R2], R1
-  mov R1, [S1-8]
-  mov [R2+8], R1
+  mov R1, [S1-1c]
+  mov [R2+1c], R1
   mov R0, &rp
   mov.u32 R1, [R0]
   add R1, R1, #2
@@ -736,9 +736,9 @@ CODE 2R>
   mov R2, &rstack
   add R2, R2, R1
   mov R1, [R2]
-  mov R3, [R2+8]
+  mov R3, [R2+1c]
   mov [S1], R1
-  mov [S1+8], R3
+  mov [S1+1c], R3
   add S1, S1, #16
 ;CODE
 
@@ -773,7 +773,7 @@ CODE SP@
 
 CODE SP!
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mov R1, &dstack
   sub R0, R0, R1
   lshr R0, R0, #3
@@ -797,8 +797,8 @@ CODE RP@
 
 CODE TYPE
   require 2
-  mov R0, [S1-16]
-  mov R1, [S1-8]
+  mov R0, [S1-2c]
+  mov R1, [S1-1c]
   add S1, S1, #-16
   sig V P W
   icall &forth_type
@@ -808,15 +808,15 @@ CODE TYPE
 
 CODE C@
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mov.u8 R0, [R0]
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 CODE C!
   require 2
-  mov R0, [S1-8]
-  mov R1, [S1-16]
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
   mov.u8 [R0], R1
   add S1, S1, #-16
 ;CODE
@@ -875,7 +875,7 @@ CODE C!
 
 CODE PICK
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   add R0, R0, #2
   mov R1, S1
   mov R2, &dstack
@@ -886,13 +886,13 @@ CODE PICK
   mov R1, R2
   sig V W W
   icall &forth_need
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   add R0, R0, #2
   shl R0, R0, #3
   mov R1, S1
   sub R1, R1, R0
   mov R2, [R1]
-  mov [S1-8], R2
+  mov [S1-1c], R2
 ;CODE
 
 : SPACE 32 EMIT ;
@@ -941,10 +941,10 @@ CODE UNLOOP
 
 CODE NATIVE>
   require 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   sig P P
   icall &forth_native
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 
 : JIT? ( xt -- flag )  DUP COLON? SWAP NATIVE? AND ;

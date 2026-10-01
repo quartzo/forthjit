@@ -615,9 +615,9 @@ native code pointer.
 
 ```
 CODE sq
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mul R0, R0, R0
-  mov [S1-8], R0
+  mov [S1-1c], R0
 ;CODE
 5 sq . CR            \ 25
 ```
@@ -659,7 +659,7 @@ A native word is a function `cell *fn(cell *sp)`:
 
 - **Argument**: the pointer just past the current top of the data stack,
   i.e. `&dstack[sp] + 1`. `CODE` copies it from `R0` into `S1`.
-- **TOS** is `[S1-8]` (the top cell); the second cell is `[S1-16]`, and so on.
+- **TOS** is `[S1-1c]` (the top cell); the second cell is `[S1-2c]`, and so on.
 - **Push** writes `[S1]` and then `S1 += 8`:
   ```
   mov [S1], R0
@@ -729,7 +729,8 @@ return register first.
 | `F0`..`F9`, `FS0`..`FS9` | float registers |
 | `V0`..`V9`, `VS0`..`VS9` | vector registers |
 | `#123`, `#0x1f` | immediate (base 0) |
-| `[R1]`, `[R1+8]`, `[S0-16]` | base + offset |
+| `[R1]`, `[R1+8]`, `[S0-16]` | base + offset (bytes) |
+| `[S1-1c]`, `[R2+1c]`, `[S1-3c]` | base + offset in cells (`c` = `sizeof(cell)`) |
 | `[R1+R2<<3]` | indexed (shift 0..3) |
 | `[#123]` | absolute address |
 | `&name` | native Forth word, else a dynamic symbol (libc included) |
@@ -933,7 +934,7 @@ inside JIT-generated code.
 ```
 CODE DUP
   room 1
-  mov R0, [S1-8]
+  mov R0, [S1-1c]
   mov [S1], R0
   add S1, S1, #8
   mov R0, S1
@@ -982,8 +983,8 @@ registers yourself and set `AL` last:
 ```
 CODE printf1 ( fmt value -- )
   mov R3, &printf        \ function address in RCX
-  mov R2, [S1-16]        \ format  -> RDI
-  mov R1, [S1-8]         \ value   -> RSI
+  mov R2, [S1-2c]        \ format  -> RDI
+  mov R1, [S1-1c]         \ value   -> RSI
   add S1, S1, #-16
   asm.mov.al 0           \ AL = 0 vector registers
   asm.call R3
@@ -1026,7 +1027,7 @@ Use `inline` for small words (removes call indirection, duplicates code) and
 turns that pointer into a named word:
 
 ```
-S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-8] add R0 R0 #100 mov [S1-8] R0 ret S1"
+S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-1c] add R0 R0 #100 mov [S1-1c] R0 ret S1"
    ASSEMBLE NATIVE plus100
 7 plus100 . CR        \ 107
 ```
@@ -1035,7 +1036,7 @@ Inside `CODE`, `IR" ..."` embeds an IR fragment at that point in the body:
 
 ```
 CODE f
-  IR" mov R0, [S1-8]  add R0, R0, #1  mov [S1-8], R0"
+  IR" mov R0, [S1-1c]  add R0, R0, #1  mov [S1-1c], R0"
 ;CODE
 ```
 
@@ -1071,7 +1072,7 @@ A native `OVER` and a `2DUP` built from it:
 
 ```
 CODE OVER
-  mov R0, [S1-16]
+  mov R0, [S1-2c]
   mov [S1], R0
   add S1, S1, #8
   mov R0, S1
@@ -1086,7 +1087,7 @@ CODE 2DUP
 A native decrement-by-100 in IR-as-a-string (no Forth prologue):
 
 ```
-S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-8] sub R0 R0 #100 mov [S1-8] R0 ret S1"
+S" enter P 4 2 0 P mov S1 S0 mov R0 [S1-1c] sub R0 R0 #100 mov [S1-1c] R0 ret S1"
    ASSEMBLE NATIVE minus100
 ```
 

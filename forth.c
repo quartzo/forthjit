@@ -1623,6 +1623,18 @@ static sljit_s32 parse_reg(struct forth *F, const char *s) {
     return 0;
 }
 
+/* A memory offset: plain bytes, or a cell count with a `c` suffix.
+   `1c` is sizeof(cell) bytes, `3c` is 3 cells; `c` alone is one cell. */
+static sljit_sw parse_cell_off(struct forth *F, const char *s) {
+    char *end;
+    if (s[0] == 'c' && s[1] == 0) return (sljit_sw)sizeof(cell);
+    long v = strtol(s, &end, 0);
+    if (*end == 0) return (sljit_sw)v;
+    if (end[0] == 'c' && end[1] == 0) return (sljit_sw)v * (sljit_sw)sizeof(cell);
+    throw_error(F, "bad memory offset");
+    return 0;
+}
+
 static void parse_mem(struct forth *F, const char *tok, sljit_s32 *para, sljit_sw *w) {
     char buf[64];
     size_t len = strlen(tok) - 2;
@@ -1652,14 +1664,14 @@ static void parse_mem(struct forth *F, const char *tok, sljit_s32 *para, sljit_s
     if (plus) {
         *plus = 0;
         *para = SLJIT_MEM1(parse_reg(F, buf));
-        *w = (sljit_sw)strtol(plus + 1, NULL, 0);
+        *w = parse_cell_off(F, plus + 1);
         return;
     }
     char *minus = strchr(buf, '-');
     if (minus) {
         *minus = 0;
         *para = SLJIT_MEM1(parse_reg(F, buf));
-        *w = -(sljit_sw)strtol(minus + 1, NULL, 0);
+        *w = -parse_cell_off(F, minus + 1);
         return;
     }
     *para = SLJIT_MEM1(parse_reg(F, buf));
