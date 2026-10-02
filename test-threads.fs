@@ -52,6 +52,11 @@ S" par = " TYPE 5 ' SQ 6 ' SQ PAR . . CR   \ 36 25
 S" chan sum = " TYPE 4 CHAN-TEST . CR       \ 4950
 S" rendezvous sum = " TYPE 0 CHAN-TEST . CR \ 4950
 
+\ channels are pooled and can be freed individually (CHAN-FREE)
+: CHAN-CHURN 500 0 DO 8 CHAN CHAN-FREE LOOP ;
+CHAN-CHURN
+S" chan pool = " TYPE S" ok" TYPE CR
+
 \ TASK: sugar -- running the name spawns the body and leaves the handle
 VARIABLE TSUM
 0 TSUM A!

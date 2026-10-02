@@ -937,6 +937,7 @@ Words:
 | `CHAN` | `( n -- ch )` | Create a channel with buffer `n` (`0` = rendezvous). |
 | `>CHAN` / `CHAN>` | `( x ch -- )` / `( ch -- x )` | Send / receive (blocking). |
 | `CHAN-CLOSE` | `( ch -- )` | Close; further receives return `0`. |
+| `CHAN-FREE` | `( ch -- )` | Return the channel to the pool (only when no task is blocked on it). |
 | `TASK:` / `;TASK` | | Like `:` but running the name spawns the body and leaves a handle. |
 | `FORK` / `;FORK` | | Lexical namespace scope: words defined in between are forgotten at `;FORK`. |
 

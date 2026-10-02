@@ -131,11 +131,11 @@ static int sljit_const_lookup(const char *name, long *out) {
 
 /* ---- IR buffer -------------------------------------------------------- */
 void ir_put_text(struct forth *F, const char *s, int len) {
-    if (F->irlen + len + 2 >= IRBUF_SIZE) throw_error(F, "IR buffer full");
-    if (F->irlen) F->irbuf[F->irlen++] = ' ';
-    memcpy(F->irbuf + F->irlen, s, (size_t)len);
-    F->irlen += len;
-    F->irbuf[F->irlen] = 0;
+    if (g_ir.irlen + len + 2 >= IRBUF_SIZE) throw_error(F, "IR buffer full");
+    if (g_ir.irlen) g_ir.irbuf[g_ir.irlen++] = ' ';
+    memcpy(g_ir.irbuf + g_ir.irlen, s, (size_t)len);
+    g_ir.irlen += len;
+    g_ir.irbuf[g_ir.irlen] = 0;
 }
 
 void ir_put(struct forth *F, const char *tok) { ir_put_text(F, tok, (int)strlen(tok)); }
@@ -158,12 +158,12 @@ static void tokenize_text(struct forth *F, const char *text, char (*out)[64], in
 }
 
 static void append_token(struct forth *F, const char *t) {
-    if (F->irtok_count >= MAX_IRTOK) throw_error(F, "too many IR tokens");
+    if (g_ir.irtok_count >= MAX_IRTOK) throw_error(F, "too many IR tokens");
     size_t L = strlen(t);
     if (L > 63) L = 63;
-    memcpy(F->irtok[F->irtok_count], t, L);
-    F->irtok[F->irtok_count][L] = 0;
-    F->irtok_count++;
+    memcpy(g_ir.irtok[g_ir.irtok_count], t, L);
+    g_ir.irtok[g_ir.irtok_count][L] = 0;
+    g_ir.irtok_count++;
 }
 
 /* Expand a CODE word's stored IR body, renaming its labels so several
@@ -172,8 +172,8 @@ static void append_token(struct forth *F, const char *t) {
 
 static void expand_body(struct forth *F, Word *w, int id) {
     if (!w->irbody) throw_error(F, "inline: word has no native body");
-    if (++F->inline_depth > 16) throw_error(F, "inline: too deep");
-    char (*btok)[64] = F->inline_toks;
+    if (++g_ir.inline_depth > 16) throw_error(F, "inline: too deep");
+    char (*btok)[64] = g_ir.inline_toks;
     int bn = 0;
     tokenize_text(F, w->irbody, btok, &bn, 2048);
     for (int i = 0; i < bn; i++) {
@@ -181,7 +181,7 @@ static void expand_body(struct forth *F, Word *w, int id) {
             if (i + 1 >= bn) throw_error(F, "inline: missing name");
             Word *t = find(F, btok[++i]);
             if (!t) throw_error(F, "inline: unknown word");
-            expand_body(F, t, ++F->inline_id);
+            expand_body(F, t, ++g_ir.inline_id);
         } else if (strcmp(btok[i], "label:") == 0 || strcmp(btok[i], "setlabel") == 0) {
             append_token(F, btok[i]);
             if (i + 1 >= bn) throw_error(F, "inline: label name missing");
@@ -203,22 +203,22 @@ static void expand_body(struct forth *F, Word *w, int id) {
             append_token(F, btok[i]);
         }
     }
-    F->inline_depth--;
+    g_ir.inline_depth--;
 }
 
 static void ir_tokenize(struct forth *F) {
-    char (*raw)[64] = F->ir_raw;
+    char (*raw)[64] = g_ir.ir_raw;
     int rn = 0;
-    tokenize_text(F, F->irbuf, raw, &rn, MAX_IRTOK);
-    F->irtok_count = 0;
-    F->inline_id = 0;
-    F->inline_depth = 0;
+    tokenize_text(F, g_ir.irbuf, raw, &rn, MAX_IRTOK);
+    g_ir.irtok_count = 0;
+    g_ir.inline_id = 0;
+    g_ir.inline_depth = 0;
     for (int i = 0; i < rn; i++) {
         if (strcmp(raw[i], "inline") == 0) {
             if (i + 1 >= rn) throw_error(F, "inline: missing name");
             Word *w = find(F, raw[++i]);
             if (!w) throw_error(F, "inline: unknown word");
-            expand_body(F, w, ++F->inline_id);
+            expand_body(F, w, ++g_ir.inline_id);
         } else {
             append_token(F, raw[i]);
         }
@@ -226,8 +226,8 @@ static void ir_tokenize(struct forth *F) {
 }
 
 static const char *ir_need(struct forth *F) {
-    if (F->irtok_pos >= F->irtok_count) throw_error(F, "unexpected end of native code");
-    return F->irtok[F->irtok_pos++];
+    if (g_ir.irtok_pos >= g_ir.irtok_count) throw_error(F, "unexpected end of native code");
+    return g_ir.irtok[g_ir.irtok_pos++];
 }
 
 /* ---- operands --------------------------------------------------------- */
@@ -395,7 +395,7 @@ static void parse_operand(struct forth *F, const char *tok, sljit_s32 *para, slj
         Word *fw = find(F, sym);            /* prefer a native Forth word */
         if (fw && fw->native) a = fw->native;
         else a = dyn_resolve(F, lib, sym);
-        if (!a) throw_error(F, F->dyn_err[0] ? F->dyn_err : "symbol not found");
+        if (!a) throw_error(F, g_sh.dyn_err[0] ? g_sh.dyn_err : "symbol not found");
         *para = SLJIT_IMM;
         *w = (sljit_sw)(intptr_t)a;
         return;
@@ -485,7 +485,8 @@ static sljit_s32 fcond_lookup(const char *s) {
 }
 
 static sljit_s32 ret_movop(struct forth *F) {
-    switch (F->cur_ret) {
+    (void)F;
+    switch (g_ir.cur_ret) {
     case SLJIT_ARG_TYPE_32:  return SLJIT_MOV32;
     case SLJIT_ARG_TYPE_P:   return SLJIT_MOV_P;
     case SLJIT_ARG_TYPE_F64: return SLJIT_MOV_F64;
@@ -498,32 +499,32 @@ static sljit_s32 ret_movop(struct forth *F) {
 static const char *label_ref(const char *s) { return (s[0] == '@') ? s + 1 : s; }
 
 static void define_label_ptr(struct forth *F, struct sljit_label *l, const char *name) {
-    if (F->nlabels >= MAX_IRLAB) throw_error(F, "too many labels");
-    F->label_ptrs[F->nlabels] = l;
-    strncpy(F->label_names[F->nlabels], name, sizeof F->label_names[0] - 1);
-    F->label_names[F->nlabels][sizeof F->label_names[0] - 1] = 0;
-    F->nlabels++;
+    if (g_ir.nlabels >= MAX_IRLAB) throw_error(F, "too many labels");
+    g_ir.label_ptrs[g_ir.nlabels] = l;
+    strncpy(g_ir.label_names[g_ir.nlabels], name, sizeof g_ir.label_names[0] - 1);
+    g_ir.label_names[g_ir.nlabels][sizeof g_ir.label_names[0] - 1] = 0;
+    g_ir.nlabels++;
 }
 
 static void define_label(struct forth *F, const char *name) {
-    define_label_ptr(F, sljit_emit_label(F->jcomp), name);
+    define_label_ptr(F, sljit_emit_label(g_ir.jcomp), name);
 }
 
 static void record_jump(struct forth *F, struct sljit_jump *j, const char *name) {
     if (!j) throw_error(F, "sljit could not emit jump");
-    if (F->njumps >= MAX_IRJMP) throw_error(F, "too many jumps");
-    F->jump_ptrs[F->njumps] = j;
-    strncpy(F->jump_names[F->njumps], name, sizeof F->jump_names[0] - 1);
-    F->jump_names[F->njumps][sizeof F->jump_names[0] - 1] = 0;
-    F->njumps++;
+    if (g_ir.njumps >= MAX_IRJMP) throw_error(F, "too many jumps");
+    g_ir.jump_ptrs[g_ir.njumps] = j;
+    strncpy(g_ir.jump_names[g_ir.njumps], name, sizeof g_ir.jump_names[0] - 1);
+    g_ir.jump_names[g_ir.njumps][sizeof g_ir.jump_names[0] - 1] = 0;
+    g_ir.njumps++;
 }
 
 static void resolve_jumps(struct forth *F) {
-    for (int i = 0; i < F->njumps; i++) {
+    for (int i = 0; i < g_ir.njumps; i++) {
         int found = 0;
-        for (int j = 0; j < F->nlabels; j++)
-            if (strcmp(F->jump_names[i], F->label_names[j]) == 0) {
-                sljit_set_label(F->jump_ptrs[i], F->label_ptrs[j]);
+        for (int j = 0; j < g_ir.nlabels; j++)
+            if (strcmp(g_ir.jump_names[i], g_ir.label_names[j]) == 0) {
+                sljit_set_label(g_ir.jump_ptrs[i], g_ir.label_ptrs[j]);
                 found = 1;
                 break;
             }
@@ -531,7 +532,7 @@ static void resolve_jumps(struct forth *F) {
     }
 }
 
-static void ensure_enter(struct forth *F) { if (!F->entered) throw_error(F, "instruction before 'enter'"); }
+static void ensure_enter(struct forth *F) { if (!g_ir.entered) throw_error(F, "instruction before 'enter'"); }
 
 static sljit_s32 op1_lookup(const char *n) {
     for (int i = 0; op1_table[i].name; i++)
@@ -559,7 +560,8 @@ static sljit_s32 op2_lookup(const char *n, int *is32) {
 
 /* ---- per-architecture raw emission (escape hatch) --------------------- */
 static void emit_raw(struct forth *F, const void *p, int n) {
-    sljit_emit_op_custom(F->jcomp, (void *)p, (sljit_u32)n);
+    (void)F;
+    sljit_emit_op_custom(g_ir.jcomp, (void *)p, (sljit_u32)n);
 }
 
 /* a data value: #imm, &symbol, or a plain number */
@@ -639,65 +641,65 @@ static void asm_mov_al(struct forth *F, int v) {                  /* mov al, imm
 /* ---- instruction dispatch --------------------------------------------- */
 static void ir_instruction(struct forth *F, const char *m) {
     if (strcmp(m, "enter") == 0) {
-        if (F->entered) throw_error(F, "duplicate enter");
+        if (g_ir.entered) throw_error(F, "duplicate enter");
         int t = type_from_name(ir_need(F));
         if (t < 0) throw_error(F, "bad return type");
-        F->cur_ret = (sljit_s32)t;
+        g_ir.cur_ret = (sljit_s32)t;
         int sc = atoi(ir_need(F));
         int sv = atoi(ir_need(F));
         int lc = atoi(ir_need(F));
-        sc |= SLJIT_ENTER_FLOAT(F->enter_fsc) | SLJIT_ENTER_VECTOR(F->enter_vsc);
-        sv |= SLJIT_ENTER_FLOAT(F->enter_fsv) | SLJIT_ENTER_VECTOR(F->enter_vsv);
-        sljit_s32 at = F->cur_ret;
+        sc |= SLJIT_ENTER_FLOAT(g_ir.enter_fsc) | SLJIT_ENTER_VECTOR(g_ir.enter_vsc);
+        sv |= SLJIT_ENTER_FLOAT(g_ir.enter_fsv) | SLJIT_ENTER_VECTOR(g_ir.enter_vsv);
+        sljit_s32 at = g_ir.cur_ret;
         int idx = 1;
-        while (F->irtok_pos < F->irtok_count) {
-            int a = type_from_name(F->irtok[F->irtok_pos]);
+        while (g_ir.irtok_pos < g_ir.irtok_count) {
+            int a = type_from_name(g_ir.irtok[g_ir.irtok_pos]);
             if (a < 0 || a == SLJIT_ARG_TYPE_RET_VOID || idx > 4) break;
             at |= (sljit_s32)(a << (idx * SLJIT_ARG_SHIFT));
             idx++;
-            F->irtok_pos++;
+            g_ir.irtok_pos++;
         }
-        F->cur_argtypes = at;
-        sljit_emit_enter(F->jcomp, 0, at, sc, sv, lc);
-        F->entered = 1;
+        g_ir.cur_argtypes = at;
+        sljit_emit_enter(g_ir.jcomp, 0, at, sc, sv, lc);
+        g_ir.entered = 1;
         return;
     }
-    if (strcmp(m, "fscratches") == 0) { F->enter_fsc = atoi(ir_need(F)); return; }
-    if (strcmp(m, "fsaveds") == 0)    { F->enter_fsv = atoi(ir_need(F)); return; }
-    if (strcmp(m, "vscratches") == 0) { F->enter_vsc = atoi(ir_need(F)); return; }
-    if (strcmp(m, "vsaveds") == 0)    { F->enter_vsv = atoi(ir_need(F)); return; }
+    if (strcmp(m, "fscratches") == 0) { g_ir.enter_fsc = atoi(ir_need(F)); return; }
+    if (strcmp(m, "fsaveds") == 0)    { g_ir.enter_fsv = atoi(ir_need(F)); return; }
+    if (strcmp(m, "vscratches") == 0) { g_ir.enter_vsc = atoi(ir_need(F)); return; }
+    if (strcmp(m, "vsaveds") == 0)    { g_ir.enter_vsv = atoi(ir_need(F)); return; }
     if (strcmp(m, "locals") == 0) {
-        if (F->entered) throw_error(F, "'locals' must precede the body");
-        F->forth_local = atoi(ir_need(F));
+        if (g_ir.entered) throw_error(F, "'locals' must precede the body");
+        g_ir.forth_local = atoi(ir_need(F));
         return;
     }
     if (strcmp(m, "sig") == 0) {
         int t = type_from_name(ir_need(F));
         if (t < 0) throw_error(F, "bad signature type");
-        F->cur_ret = (sljit_s32)t;
-        sljit_s32 at = F->cur_ret;
+        g_ir.cur_ret = (sljit_s32)t;
+        sljit_s32 at = g_ir.cur_ret;
         int idx = 1;
-        while (F->irtok_pos < F->irtok_count) {
-            int a = type_from_name(F->irtok[F->irtok_pos]);
+        while (g_ir.irtok_pos < g_ir.irtok_count) {
+            int a = type_from_name(g_ir.irtok[g_ir.irtok_pos]);
             if (a < 0 || a == SLJIT_ARG_TYPE_RET_VOID || idx > 4) break;
             at |= (sljit_s32)(a << (idx * SLJIT_ARG_SHIFT));
             idx++;
-            F->irtok_pos++;
+            g_ir.irtok_pos++;
         }
-        F->cur_argtypes = at;
-        F->cur_nargs = idx - 1;
+        g_ir.cur_argtypes = at;
+        g_ir.cur_nargs = idx - 1;
         return;
     }
     if (strcmp(m, "dlopen") == 0) {
         const char *lib = ir_need(F);
         if (!dyn_open(F, lib, RTLD_NOW | RTLD_GLOBAL))
-            throw_error(F, F->dyn_err[0] ? F->dyn_err : "dlopen failed");
+            throw_error(F, g_sh.dyn_err[0] ? g_sh.dyn_err : "dlopen failed");
         return;
     }
     if (strcmp(m, "dlclose") == 0) {
         const char *lib = ir_need(F);
-        for (int i = 0; i < F->nlibs; i++)
-            if (strcmp(F->dynlibs[i].name, lib) == 0) { dyn_close(F, F->dynlibs[i].handle); return; }
+        for (int i = 0; i < g_sh.nlibs; i++)
+            if (strcmp(g_sh.dynlibs[i].name, lib) == 0) { dyn_close(F, g_sh.dynlibs[i].handle); return; }
         throw_error(F, "library not open");
     }
     if (strcmp(m, "label:") == 0 || strcmp(m, "setlabel") == 0) {
@@ -706,7 +708,7 @@ static void ir_instruction(struct forth *F, const char *m) {
     }
     if (strcmp(m, "op0") == 0) {
         ensure_enter(F);
-        sljit_emit_op0(F->jcomp, parse_opnum(F, ir_need(F)));
+        sljit_emit_op0(g_ir.jcomp, parse_opnum(F, ir_need(F)));
         return;
     }
     if (strcmp(m, "op1") == 0) {
@@ -715,7 +717,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d, s; sljit_sw dw, sw;
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &s, &sw);
-        sljit_emit_op1(F->jcomp, op, d, dw, s, sw);
+        sljit_emit_op1(g_ir.jcomp, op, d, dw, s, sw);
         return;
     }
     if (strcmp(m, "op2") == 0) {
@@ -725,7 +727,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_op2(F->jcomp, op, d, dw, a, aw, b, bw);
+        sljit_emit_op2(g_ir.jcomp, op, d, dw, a, aw, b, bw);
         return;
     }
     if (strcmp(m, "cmp") == 0) {
@@ -737,14 +739,14 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
         const char *lb = ir_need(F);
-        record_jump(F, sljit_emit_cmp(F->jcomp, ty, a, aw, b, bw), label_ref(lb));
+        record_jump(F, sljit_emit_cmp(g_ir.jcomp, ty, a, aw, b, bw), label_ref(lb));
         return;
     }
     if (strcmp(m, "jump") == 0) {
         ensure_enter(F);
         sljit_s32 ty = parse_opnum(F, ir_need(F));
         const char *target = ir_need(F);
-        struct sljit_jump *j = sljit_emit_jump(F->jcomp, ty);
+        struct sljit_jump *j = sljit_emit_jump(g_ir.jcomp, ty);
         if (target[0] == '#') sljit_set_target(j, (sljit_uw)strtoull(target + 1, NULL, 0));
         else record_jump(F, j, label_ref(target));
         return;
@@ -754,14 +756,14 @@ static void ir_instruction(struct forth *F, const char *m) {
         const char *name = ir_need(F);
         sljit_s32 ty = parse_opnum(F, ir_need(F));
         const char *target = ir_need(F);
-        struct sljit_jump *j = sljit_emit_jump(F->jcomp, ty | SLJIT_REWRITABLE_JUMP);
+        struct sljit_jump *j = sljit_emit_jump(g_ir.jcomp, ty | SLJIT_REWRITABLE_JUMP);
         if (target[0] == '#') sljit_set_target(j, (sljit_uw)strtoull(target + 1, NULL, 0));
         else record_jump(F, j, label_ref(target));
-        if (F->n_pend_jumps >= MAX_PATCH) throw_error(F, "too many rewritable jumps");
-        F->pend_jumps[F->n_pend_jumps] = j;
-        strncpy(F->pend_jump_names[F->n_pend_jumps], name, 31);
-        F->pend_jump_names[F->n_pend_jumps][31] = 0;
-        F->n_pend_jumps++;
+        if (g_ir.n_pend_jumps >= MAX_PATCH) throw_error(F, "too many rewritable jumps");
+        g_ir.pend_jumps[g_ir.n_pend_jumps] = j;
+        strncpy(g_ir.pend_jump_names[g_ir.n_pend_jumps], name, 31);
+        g_ir.pend_jump_names[g_ir.n_pend_jumps][31] = 0;
+        g_ir.n_pend_jumps++;
         return;
     }
     if (strcmp(m, "const") == 0 || strcmp(m, "rwconst") == 0) {
@@ -772,21 +774,21 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d; sljit_sw dw;
         parse_operand(F, ir_need(F), &d, &dw);
         sljit_sw val = (sljit_sw)strtol(ir_need(F), NULL, 0);
-        struct sljit_const *c = sljit_emit_const(F->jcomp, op, d, dw, val);
+        struct sljit_const *c = sljit_emit_const(g_ir.jcomp, op, d, dw, val);
         if (name) {
-            if (F->n_pend_consts >= MAX_PATCH) throw_error(F, "too many rewritable consts");
-            F->pend_consts[F->n_pend_consts] = c;
-            F->pend_const_ops[F->n_pend_consts] = op;
-            strncpy(F->pend_const_names[F->n_pend_consts], name, 31);
-            F->pend_const_names[F->n_pend_consts][31] = 0;
-            F->n_pend_consts++;
+            if (g_ir.n_pend_consts >= MAX_PATCH) throw_error(F, "too many rewritable consts");
+            g_ir.pend_consts[g_ir.n_pend_consts] = c;
+            g_ir.pend_const_ops[g_ir.n_pend_consts] = op;
+            strncpy(g_ir.pend_const_names[g_ir.n_pend_consts], name, 31);
+            g_ir.pend_const_names[g_ir.n_pend_consts][31] = 0;
+            g_ir.n_pend_consts++;
         }
         return;
     }
     if (strcmp(m, "jmp") == 0) {
         ensure_enter(F);
         const char *lb = ir_need(F);
-        record_jump(F, sljit_emit_jump(F->jcomp, SLJIT_JUMP), label_ref(lb));
+        record_jump(F, sljit_emit_jump(g_ir.jcomp, SLJIT_JUMP), label_ref(lb));
         return;
     }
     if (strcmp(m, "call") == 0 || strcmp(m, "icall") == 0) {
@@ -795,19 +797,19 @@ static void ir_instruction(struct forth *F, const char *m) {
         const char *tok = ir_need(F);
         parse_operand(F, tok, &p, &w);
         /* interpreter helpers (&forth_*) receive the context as last argument */
-        if (tok[0] == '&' && strncmp(tok + 1, "forth_", 6) == 0 && F->cur_nargs < 4) {
-            sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_R(F->cur_nargs), 0,
+        if (tok[0] == '&' && strncmp(tok + 1, "forth_", 6) == 0 && g_ir.cur_nargs < 4) {
+            sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_R(g_ir.cur_nargs), 0,
                            CTX_REG, 0);
-            F->cur_argtypes |= (sljit_s32)(SLJIT_ARG_TYPE_P << ((F->cur_nargs + 1) * SLJIT_ARG_SHIFT));
+            g_ir.cur_argtypes |= (sljit_s32)(SLJIT_ARG_TYPE_P << ((g_ir.cur_nargs + 1) * SLJIT_ARG_SHIFT));
         }
-        sljit_emit_icall(F->jcomp, SLJIT_CALL, F->cur_argtypes, p, w);
+        sljit_emit_icall(g_ir.jcomp, SLJIT_CALL, g_ir.cur_argtypes, p, w);
         return;
     }
     if (strcmp(m, "icall.reg") == 0) {
         ensure_enter(F);
         sljit_s32 p; sljit_sw w;
         parse_operand(F, ir_need(F), &p, &w);
-        sljit_emit_icall(F->jcomp, SLJIT_CALL_REG_ARG, F->cur_argtypes, p, w);
+        sljit_emit_icall(g_ir.jcomp, SLJIT_CALL_REG_ARG, g_ir.cur_argtypes, p, w);
         return;
     }
     if (strcmp(m, "callw") == 0) {
@@ -816,35 +818,35 @@ static void ir_instruction(struct forth *F, const char *m) {
         Word *w = find(F, name);
         if (!w) throw_error(F, "callw: unknown word");
         if (!w->native) throw_error(F, "callw: not a native word");
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S1, 0);
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_R1, 0, CTX_REG, 0);
-        sljit_emit_icall(F->jcomp, SLJIT_CALL, SLJIT_ARGS2(P, P, P), SLJIT_IMM,
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S1, 0);
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_R1, 0, CTX_REG, 0);
+        sljit_emit_icall(g_ir.jcomp, SLJIT_CALL, SLJIT_ARGS2(P, P, P), SLJIT_IMM,
                          (sljit_sw)(intptr_t)w->native);
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_S1, 0, SLJIT_R0, 0);
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_S1, 0, SLJIT_R0, 0);
         return;
     }
     if (strcmp(m, "ret") == 0) {
         ensure_enter(F);
-        if (F->irtok_pos < F->irtok_count && looks_like_operand(F->irtok[F->irtok_pos])) {
+        if (g_ir.irtok_pos < g_ir.irtok_count && looks_like_operand(g_ir.irtok[g_ir.irtok_pos])) {
             sljit_s32 s; sljit_sw sw;
             parse_operand(F, ir_need(F), &s, &sw);
-            sljit_emit_return(F->jcomp, ret_movop(F), s, sw);
+            sljit_emit_return(g_ir.jcomp, ret_movop(F), s, sw);
         } else {
-            sljit_emit_return_void(F->jcomp);
+            sljit_emit_return_void(g_ir.jcomp);
         }
-        F->returned = 1;
+        g_ir.returned = 1;
         return;
     }
-    if (strcmp(m, "nop") == 0)  { ensure_enter(F); sljit_emit_op0(F->jcomp, SLJIT_NOP); return; }
-    if (strcmp(m, "int3") == 0) { ensure_enter(F); sljit_emit_op0(F->jcomp, SLJIT_BREAKPOINT); return; }
+    if (strcmp(m, "nop") == 0)  { ensure_enter(F); sljit_emit_op0(g_ir.jcomp, SLJIT_NOP); return; }
+    if (strcmp(m, "int3") == 0) { ensure_enter(F); sljit_emit_op0(g_ir.jcomp, SLJIT_BREAKPOINT); return; }
     if (strcmp(m, "spush") == 0) {
         /* push a register or immediate onto the data stack: [S1] = src; S1 += 8 */
         ensure_enter(F);
         sljit_s32 s; sljit_sw sw;
         parse_operand(F, ir_need(F), &s, &sw);
         if (s & SLJIT_MEM) throw_error(F, "spush: operand must be a register or immediate");
-        sljit_emit_op1(F->jcomp, SLJIT_MOV, SLJIT_MEM1(SLJIT_S1), 0, s, sw);
-        sljit_emit_op2(F->jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, (sljit_sw)sizeof(cell));
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV, SLJIT_MEM1(SLJIT_S1), 0, s, sw);
+        sljit_emit_op2(g_ir.jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, (sljit_sw)sizeof(cell));
         return;
     }
     if (strcmp(m, "spop") == 0) {
@@ -853,18 +855,18 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d; sljit_sw dw;
         parse_operand(F, ir_need(F), &d, &dw);
         if ((d & SLJIT_MEM) || d == SLJIT_IMM) throw_error(F, "spop: operand must be a register");
-        sljit_emit_op2(F->jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, -(sljit_sw)sizeof(cell));
-        sljit_emit_op1(F->jcomp, SLJIT_MOV, d, dw, SLJIT_MEM1(SLJIT_S1), 0);
+        sljit_emit_op2(g_ir.jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, -(sljit_sw)sizeof(cell));
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV, d, dw, SLJIT_MEM1(SLJIT_S1), 0);
         return;
     }
     if (strcmp(m, "sdrop") == 0) {
         /* drop one cell (or #n cells) from the data stack: S1 -= 8 * n */
         ensure_enter(F);
         sljit_sw n = 1;
-        if (F->irtok_pos < F->irtok_count && F->irtok[F->irtok_pos][0] == '#')
+        if (g_ir.irtok_pos < g_ir.irtok_count && g_ir.irtok[g_ir.irtok_pos][0] == '#')
             n = (sljit_sw)strtol(ir_need(F) + 1, NULL, 0);
         if (n < 0) throw_error(F, "sdrop: count must be >= 0");
-        if (n) sljit_emit_op2(F->jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, -(sljit_sw)sizeof(cell) * n);
+        if (n) sljit_emit_op2(g_ir.jcomp, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, -(sljit_sw)sizeof(cell) * n);
         return;
     }
 
@@ -879,7 +881,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 mem; sljit_sw mw;
         parse_operand(F, ir_need(F), &mem, &mw);
         if ((d & SLJIT_MEM) || (mem & SLJIT_MEM)) throw_error(F, "atomic.load: operands must be registers");
-        sljit_emit_atomic_load(F->jcomp, aop, d, mem);
+        sljit_emit_atomic_load(g_ir.jcomp, aop, d, mem);
         return;
     }
     if (strcmp(m, "atomic.store") == 0) {
@@ -893,7 +895,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &tmp, &tw);
         if ((s & SLJIT_MEM) || (mem & SLJIT_MEM) || (tmp & SLJIT_MEM))
             throw_error(F, "atomic.store: operands must be registers");
-        sljit_emit_atomic_store(F->jcomp, aop, s, mem, tmp);
+        sljit_emit_atomic_store(g_ir.jcomp, aop, s, mem, tmp);
         return;
     }
 
@@ -903,7 +905,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d, s; sljit_sw dw, sw;
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &s, &sw);
-        sljit_emit_op1(F->jcomp, op, d, dw, s, sw);
+        sljit_emit_op1(g_ir.jcomp, op, d, dw, s, sw);
         return;
     }
     int is32 = 0;
@@ -913,7 +915,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_op2(F->jcomp, op | (is32 ? SLJIT_32 : 0), d, dw, a, aw, b, bw);
+        sljit_emit_op2(g_ir.jcomp, op | (is32 ? SLJIT_32 : 0), d, dw, a, aw, b, bw);
         return;
     }
     if (strcmp(m, "neg") == 0) {
@@ -921,7 +923,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d, s; sljit_sw dw, sw;
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &s, &sw);
-        sljit_emit_op2(F->jcomp, SLJIT_SUB, d, dw, SLJIT_IMM, 0, s, sw);
+        sljit_emit_op2(g_ir.jcomp, SLJIT_SUB, d, dw, SLJIT_IMM, 0, s, sw);
         return;
     }
     if (strcmp(m, "not") == 0) {
@@ -929,7 +931,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d, s; sljit_sw dw, sw;
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &s, &sw);
-        sljit_emit_op2(F->jcomp, SLJIT_XOR, d, dw, s, sw, SLJIT_IMM, -1);
+        sljit_emit_op2(g_ir.jcomp, SLJIT_XOR, d, dw, s, sw, SLJIT_IMM, -1);
         return;
     }
     if (strcmp(m, "op2u") == 0) {
@@ -938,7 +940,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 a, b; sljit_sw aw, bw;
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_op2u(F->jcomp, op, a, aw, b, bw);
+        sljit_emit_op2u(g_ir.jcomp, op, a, aw, b, bw);
         return;
     }
     if (strcmp(m, "op2r") == 0) {
@@ -948,7 +950,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_op2r(F->jcomp, op, d, a, aw, b, bw);
+        sljit_emit_op2r(g_ir.jcomp, op, d, a, aw, b, bw);
         return;
     }
     if (strcmp(m, "op2shift") == 0) {
@@ -959,7 +961,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
         sh = (sljit_sw)strtol(ir_need(F), NULL, 0);
-        sljit_emit_op2_shift(F->jcomp, op, d, dw, a, aw, b, bw, sh);
+        sljit_emit_op2_shift(g_ir.jcomp, op, d, dw, a, aw, b, bw, sh);
         return;
     }
     if (strcmp(m, "op2cmpz") == 0) {
@@ -970,7 +972,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
         const char *lb = ir_need(F);
-        record_jump(F, sljit_emit_op2cmpz(F->jcomp, op, d, dw, a, aw, b, bw), label_ref(lb));
+        record_jump(F, sljit_emit_op2cmpz(g_ir.jcomp, op, d, dw, a, aw, b, bw), label_ref(lb));
         return;
     }
     if (strcmp(m, "setflags") == 0) {
@@ -981,7 +983,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 a, b; sljit_sw aw, bw;
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_op2u(F->jcomp, SLJIT_SUB | cmp_set_flag(ty), a, aw, b, bw);
+        sljit_emit_op2u(g_ir.jcomp, SLJIT_SUB | cmp_set_flag(ty), a, aw, b, bw);
         return;
     }
     if (strcmp(m, "flags") == 0) {
@@ -991,7 +993,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         if (ty < 0) ty = parse_opnum(F, first);
         sljit_s32 d; sljit_sw dw;
         parse_operand(F, ir_need(F), &d, &dw);
-        sljit_emit_op_flags(F->jcomp, SLJIT_MOV, d, dw, ty);
+        sljit_emit_op_flags(g_ir.jcomp, SLJIT_MOV, d, dw, ty);
         return;
     }
     if (strcmp(m, "select") == 0) {
@@ -1003,7 +1005,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_select(F->jcomp, ty, d, a, aw, b);
+        sljit_emit_select(g_ir.jcomp, ty, d, a, aw, b);
         return;
     }
     if (strcmp(m, "ijump") == 0) {
@@ -1011,7 +1013,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 ty = parse_opnum(F, ir_need(F));
         sljit_s32 p; sljit_sw w;
         parse_operand(F, ir_need(F), &p, &w);
-        sljit_emit_ijump(F->jcomp, ty, p, w);
+        sljit_emit_ijump(g_ir.jcomp, ty, p, w);
         return;
     }
     if (strcmp(m, "opsrc") == 0) {
@@ -1019,7 +1021,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 op = parse_opnum(F, ir_need(F));
         sljit_s32 p; sljit_sw w;
         parse_operand(F, ir_need(F), &p, &w);
-        sljit_emit_op_src(F->jcomp, op, p, w);
+        sljit_emit_op_src(g_ir.jcomp, op, p, w);
         return;
     }
     if (strcmp(m, "opdst") == 0) {
@@ -1027,15 +1029,15 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 op = parse_opnum(F, ir_need(F));
         sljit_s32 p; sljit_sw w;
         parse_operand(F, ir_need(F), &p, &w);
-        sljit_emit_op_dst(F->jcomp, op, p, w);
+        sljit_emit_op_dst(g_ir.jcomp, op, p, w);
         return;
     }
     if (strcmp(m, "ret_to") == 0) {
         ensure_enter(F);
         sljit_s32 p; sljit_sw w;
         parse_operand(F, ir_need(F), &p, &w);
-        sljit_emit_return_to(F->jcomp, p, w);
-        F->returned = 1;
+        sljit_emit_return_to(g_ir.jcomp, p, w);
+        g_ir.returned = 1;
         return;
     }
     if (strcmp(m, "opaddr") == 0) {
@@ -1044,13 +1046,13 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d; sljit_sw dw;
         parse_operand(F, ir_need(F), &d, &dw);
         const char *lb = ir_need(F);
-        record_jump(F, sljit_emit_op_addr(F->jcomp, op, d, dw), label_ref(lb));
+        record_jump(F, sljit_emit_op_addr(g_ir.jcomp, op, d, dw), label_ref(lb));
         return;
     }
     if (strcmp(m, "aligned_label") == 0) {
         sljit_s32 al = parse_opnum(F, ir_need(F));
         const char *name = ir_need(F);
-        define_label_ptr(F, sljit_emit_aligned_label(F->jcomp, al, NULL), name);
+        define_label_ptr(F, sljit_emit_aligned_label(g_ir.jcomp, al, NULL), name);
         return;
     }
     if (strcmp(m, "custom") == 0) {
@@ -1060,7 +1062,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         unsigned char bytes[256];
         for (int i = 0; i < n; i++)
             bytes[i] = (unsigned char)strtol(ir_need(F), NULL, 0);
-        sljit_emit_op_custom(F->jcomp, bytes, (sljit_u32)n);
+        sljit_emit_op_custom(g_ir.jcomp, bytes, (sljit_u32)n);
         return;
     }
     if (strcmp(m, "db") == 0 || strcmp(m, "dw") == 0 ||
@@ -1076,13 +1078,13 @@ static void ir_instruction(struct forth *F, const char *m) {
         int n = atoi(ir_need(F));
         void *fn = (strcmp(m, "require") == 0) ? (void *)(intptr_t)forth_need
                                                : (void *)(intptr_t)forth_room;
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S1, 0);                 /* r0 = sp */
-        sljit_emit_op2(F->jcomp, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0,
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S1, 0);                 /* r0 = sp */
+        sljit_emit_op2(g_ir.jcomp, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0,
                        SLJIT_MEM1(CTX_REG), (sljit_sw)offsetof(struct forth, dstack));   /* r0 -= dstack */
-        sljit_emit_op2(F->jcomp, SLJIT_LSHR, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 3);    /* /8 = depth */
-        sljit_emit_op1(F->jcomp, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, n);                  /* r1 = need */
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_R2, 0, CTX_REG, 0);
-        sljit_emit_icall(F->jcomp, SLJIT_CALL, SLJIT_ARGS3V(W, W, P), SLJIT_IMM, (sljit_sw)fn);
+        sljit_emit_op2(g_ir.jcomp, SLJIT_LSHR, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 3);    /* /8 = depth */
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, n);                  /* r1 = need */
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_R2, 0, CTX_REG, 0);
+        sljit_emit_icall(g_ir.jcomp, SLJIT_CALL, SLJIT_ARGS3V(W, W, P), SLJIT_IMM, (sljit_sw)fn);
         return;
     }
 #if (defined SLJIT_CONFIG_X86_64 && SLJIT_CONFIG_X86_64)
@@ -1114,7 +1116,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 d, s; sljit_sw dw, sw;
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &s, &sw);
-        sljit_emit_fop1(F->jcomp, op, d, dw, s, sw);
+        sljit_emit_fop1(g_ir.jcomp, op, d, dw, s, sw);
         return;
     }
     if (strcmp(m, "fop2") == 0) {
@@ -1124,7 +1126,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &d, &dw);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_fop2(F->jcomp, op, d, dw, a, aw, b, bw);
+        sljit_emit_fop2(g_ir.jcomp, op, d, dw, a, aw, b, bw);
         return;
     }
     if (strcmp(m, "fop2r") == 0) {
@@ -1134,7 +1136,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand_p(F, ir_need(F), &d);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
-        sljit_emit_fop2r(F->jcomp, op, d, a, aw, b, bw);
+        sljit_emit_fop2r(g_ir.jcomp, op, d, a, aw, b, bw);
         return;
     }
     if (strcmp(m, "fcmp") == 0) {
@@ -1146,7 +1148,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand(F, ir_need(F), &b, &bw);
         const char *lb = ir_need(F);
-        record_jump(F, sljit_emit_fcmp(F->jcomp, ty, a, aw, b, bw), label_ref(lb));
+        record_jump(F, sljit_emit_fcmp(g_ir.jcomp, ty, a, aw, b, bw), label_ref(lb));
         return;
     }
     if (strcmp(m, "fselect") == 0) {
@@ -1158,7 +1160,7 @@ static void ir_instruction(struct forth *F, const char *m) {
         parse_operand_p(F, ir_need(F), &d);
         parse_operand(F, ir_need(F), &a, &aw);
         parse_operand_p(F, ir_need(F), &b);
-        sljit_emit_fselect(F->jcomp, ty, d, a, aw, b);
+        sljit_emit_fselect(g_ir.jcomp, ty, d, a, aw, b);
         return;
     }
     if (strcmp(m, "fcopy") == 0) {
@@ -1167,21 +1169,21 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 f, r; sljit_sw rw;
         parse_operand_p(F, ir_need(F), &f);
         parse_operand(F, ir_need(F), &r, &rw);
-        sljit_emit_fcopy(F->jcomp, op, f, r);
+        sljit_emit_fcopy(g_ir.jcomp, op, f, r);
         return;
     }
     if (strcmp(m, "fset32") == 0) {
         ensure_enter(F);
         sljit_s32 f; parse_operand_p(F, ir_need(F), &f);
         sljit_f32 v = (sljit_f32)strtod(ir_need(F), NULL);
-        sljit_emit_fset32(F->jcomp, f, v);
+        sljit_emit_fset32(g_ir.jcomp, f, v);
         return;
     }
     if (strcmp(m, "fset64") == 0) {
         ensure_enter(F);
         sljit_s32 f; parse_operand_p(F, ir_need(F), &f);
         sljit_f64 v = (sljit_f64)strtod(ir_need(F), NULL);
-        sljit_emit_fset64(F->jcomp, f, v);
+        sljit_emit_fset64(g_ir.jcomp, f, v);
         return;
     }
     if (strcmp(m, "fmem") == 0 || strcmp(m, "fmem_update") == 0) {
@@ -1190,8 +1192,8 @@ static void ir_instruction(struct forth *F, const char *m) {
         sljit_s32 f; parse_operand_p(F, ir_need(F), &f);
         sljit_s32 memop; sljit_sw memw;
         parse_operand(F, ir_need(F), &memop, &memw);
-        if (m[5] == '_') sljit_emit_fmem_update(F->jcomp, ty, f, memop, memw);
-        else            sljit_emit_fmem(F->jcomp, ty, f, memop, memw);
+        if (m[5] == '_') sljit_emit_fmem_update(g_ir.jcomp, ty, f, memop, memw);
+        else            sljit_emit_fmem(g_ir.jcomp, ty, f, memop, memw);
         return;
     }
     throw_error(F, "unknown native mnemonic");
@@ -1199,70 +1201,70 @@ static void ir_instruction(struct forth *F, const char *m) {
 
 /* ---- assemble current irbuf into machine code ------------------------- */
 void *ir_compile(struct forth *F, int abi, int local) {
-    F->jcomp = sljit_create_compiler(NULL);
-    if (!F->jcomp) throw_error(F, "cannot create jit compiler");
-    F->forth_abi = abi;
-    F->forth_local = local;
-    F->entered = F->returned = 0;
-    F->nlabels = F->njumps = 0;
-    F->cur_ret = SLJIT_ARG_TYPE_RET_VOID;
-    F->cur_argtypes = 0;
-    F->enter_fsc = F->enter_fsv = F->enter_vsc = F->enter_vsv = 0;
-    F->n_pend_jumps = F->n_pend_consts = 0;
+    g_ir.jcomp = sljit_create_compiler(NULL);
+    if (!g_ir.jcomp) throw_error(F, "cannot create jit compiler");
+    g_ir.forth_abi = abi;
+    g_ir.forth_local = local;
+    g_ir.entered = g_ir.returned = 0;
+    g_ir.nlabels = g_ir.njumps = 0;
+    g_ir.cur_ret = SLJIT_ARG_TYPE_RET_VOID;
+    g_ir.cur_argtypes = 0;
+    g_ir.enter_fsc = g_ir.enter_fsv = g_ir.enter_vsc = g_ir.enter_vsv = 0;
+    g_ir.n_pend_jumps = g_ir.n_pend_consts = 0;
 
     ir_tokenize(F);
-    F->irtok_pos = 0;
+    g_ir.irtok_pos = 0;
 
-    if (F->forth_abi) {
-        if (F->irtok_pos < F->irtok_count && strcmp(F->irtok[F->irtok_pos], "locals") == 0) {
-            F->irtok_pos++;
-            F->forth_local = atoi(ir_need(F));
+    if (g_ir.forth_abi) {
+        if (g_ir.irtok_pos < g_ir.irtok_count && strcmp(g_ir.irtok[g_ir.irtok_pos], "locals") == 0) {
+            g_ir.irtok_pos++;
+            g_ir.forth_local = atoi(ir_need(F));
         }
         /* scratch-register arguments: the stack pointer arrives in R0 and the
            task context in R1, matching the C call ABI used by callw, so native
            words can call each other directly. */
-        sljit_emit_enter(F->jcomp, 0, SLJIT_ARGS2(P, P_R, P_R),
-                         4 | SLJIT_ENTER_FLOAT(6), 3, F->forth_local);
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, SLJIT_S1, 0, SLJIT_R0, 0);
-        sljit_emit_op1(F->jcomp, SLJIT_MOV_P, CTX_REG, 0, SLJIT_R1, 0);
-        F->cur_ret = SLJIT_ARG_TYPE_P;
-        F->cur_argtypes = SLJIT_ARGS2(P, P, P);
-        F->entered = 1;
+        sljit_emit_enter(g_ir.jcomp, 0, SLJIT_ARGS2(P, P_R, P_R),
+                         4 | SLJIT_ENTER_FLOAT(6), 3, g_ir.forth_local);
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, SLJIT_S1, 0, SLJIT_R0, 0);
+        sljit_emit_op1(g_ir.jcomp, SLJIT_MOV_P, CTX_REG, 0, SLJIT_R1, 0);
+        g_ir.cur_ret = SLJIT_ARG_TYPE_P;
+        g_ir.cur_argtypes = SLJIT_ARGS2(P, P, P);
+        g_ir.entered = 1;
     }
 
-    while (F->irtok_pos < F->irtok_count) ir_instruction(F, ir_need(F));
+    while (g_ir.irtok_pos < g_ir.irtok_count) ir_instruction(F, ir_need(F));
 
     resolve_jumps(F);
-    if (F->forth_abi) sljit_emit_return(F->jcomp, SLJIT_MOV_P, SLJIT_S1, 0);
-    if (!F->forth_abi && !F->returned) throw_error(F, "native code needs 'ret'");
-    if (sljit_get_compiler_error(F->jcomp) != SLJIT_SUCCESS)
+    if (g_ir.forth_abi) sljit_emit_return(g_ir.jcomp, SLJIT_MOV_P, SLJIT_S1, 0);
+    if (!g_ir.forth_abi && !g_ir.returned) throw_error(F, "native code needs 'ret'");
+    if (sljit_get_compiler_error(g_ir.jcomp) != SLJIT_SUCCESS)
         throw_error(F, "sljit rejected the instruction stream");
 
-    void *code = sljit_generate_code(F->jcomp, 0, NULL);
+    void *code = sljit_generate_code(g_ir.jcomp, 0, NULL);
     if (!code) {
-        sljit_free_compiler(F->jcomp);
-        F->jcomp = NULL;
-        F->n_pend_jumps = F->n_pend_consts = 0;
+        sljit_free_compiler(g_ir.jcomp);
+        g_ir.jcomp = NULL;
+        g_ir.n_pend_jumps = g_ir.n_pend_consts = 0;
         throw_error(F, "code generation failed");
     }
-    F->patch_exec_off = sljit_get_executable_offset(F->jcomp);
-    F->last_gen_size = sljit_get_generated_code_size(F->jcomp);
-    for (int i = 0; i < F->n_pend_jumps && F->npatch_jumps < MAX_PATCH; i++) {
-        F->patch_jumps[F->npatch_jumps].addr = sljit_get_jump_addr(F->pend_jumps[i]);
-        memcpy(F->patch_jumps[F->npatch_jumps].name, F->pend_jump_names[i], sizeof F->patch_jumps[0].name);
-        F->patch_jumps[F->npatch_jumps].name[31] = 0;
-        F->npatch_jumps++;
+    g_ir.patch_exec_off = sljit_get_executable_offset(g_ir.jcomp);
+    g_ir.last_gen_size = sljit_get_generated_code_size(g_ir.jcomp);
+    for (int i = 0; i < g_ir.n_pend_jumps && g_ir.npatch_jumps < MAX_PATCH; i++) {
+        g_ir.patch_jumps[g_ir.npatch_jumps].addr = sljit_get_jump_addr(g_ir.pend_jumps[i]);
+        memcpy(g_ir.patch_jumps[g_ir.npatch_jumps].name, g_ir.pend_jump_names[i], sizeof g_ir.patch_jumps[0].name);
+        g_ir.patch_jumps[g_ir.npatch_jumps].name[31] = 0;
+        g_ir.npatch_jumps++;
     }
-    for (int i = 0; i < F->n_pend_consts && F->npatch_consts < MAX_PATCH; i++) {
-        F->patch_consts[F->npatch_consts].addr = sljit_get_const_addr(F->pend_consts[i]);
-        F->patch_consts[F->npatch_consts].op = F->pend_const_ops[i];
-        memcpy(F->patch_consts[F->npatch_consts].name, F->pend_const_names[i], sizeof F->patch_consts[0].name);
-        F->patch_consts[F->npatch_consts].name[31] = 0;
-        F->npatch_consts++;
+    for (int i = 0; i < g_ir.n_pend_consts && g_ir.npatch_consts < MAX_PATCH; i++) {
+        g_ir.patch_consts[g_ir.npatch_consts].addr = sljit_get_const_addr(g_ir.pend_consts[i]);
+        g_ir.patch_consts[g_ir.npatch_consts].op = g_ir.pend_const_ops[i];
+        memcpy(g_ir.patch_consts[g_ir.npatch_consts].name, g_ir.pend_const_names[i], sizeof g_ir.patch_consts[0].name);
+        g_ir.patch_consts[g_ir.npatch_consts].name[31] = 0;
+        g_ir.npatch_consts++;
     }
-    F->n_pend_jumps = F->n_pend_consts = 0;
-    sljit_free_compiler(F->jcomp);
-    F->jcomp = NULL;
-    if (F->njit < MAX_JIT) F->jit_codes[F->njit++] = code;
+    g_ir.n_pend_jumps = g_ir.n_pend_consts = 0;
+    sljit_free_compiler(g_ir.jcomp);
+    g_ir.jcomp = NULL;
+    if (g_ir.njit < MAX_JIT) g_ir.jit_codes[g_ir.njit++] = code;
     return code;
 }

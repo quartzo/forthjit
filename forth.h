@@ -50,7 +50,8 @@ struct Word {
 
 /* ---- locals { a b -- c } --------------------------------------------- */
 #define MAX_LOCALS 16
-#define LOCALS_MAX 4096
+#define LOCALS_MAX 4096                       /* per-definition, not a hard cap */
+#define LOCALS_RESERVE ((size_t)1 << 20)      /* 8 MiB virtual per context */
 
 typedef struct {
     int  n;                    /* total declared locals */
@@ -69,6 +70,7 @@ typedef struct {
 #define ERR_UNKNOWN  (-13)
 
 #define MAX_XFRAME 64
+#define XFRAME_RESERVE ((size_t)1 << 12)   /* 4096 virtual CATCH frames */
 typedef struct {
     jmp_buf env;
     int     fx_sp, fx_rp;
@@ -102,6 +104,69 @@ typedef struct { char name[32]; sljit_uw addr; sljit_s32 op; } PatchConst;
 
 /* ---- generated code registry ----------------------------------------- */
 #define MAX_JIT 1024
+
+/* ---- compile/JIT state (single instance: compilation is serialized by the
+   shared-memory lock; only the root context ever compiles) --------------- */
+struct Ir {
+    /* generated code registry */
+    void *jit_codes[MAX_JIT];
+    int   njit;
+
+    /* SLJIT assembler + IR token stream */
+    struct sljit_compiler *jcomp;
+    Word *jit_exit;
+    char  irbuf[IRBUF_SIZE];
+    int   irlen;
+    char  ir_raw[MAX_IRTOK][64];
+    char  irtok[MAX_IRTOK][64];
+    int   irtok_count;
+    int   irtok_pos;
+    char  inline_toks[2048][64];
+    int   inline_id, inline_depth;
+    char  label_names[MAX_IRLAB][32];
+    struct sljit_label *label_ptrs[MAX_IRLAB];
+    int   nlabels;
+    char  jump_names[MAX_IRJMP][32];
+    struct sljit_jump  *jump_ptrs[MAX_IRJMP];
+    int   njumps;
+    int   forth_abi, forth_local, entered, returned;
+    int   enter_fsc, enter_fsv, enter_vsc, enter_vsv;
+    PatchJump  patch_jumps[MAX_PATCH];
+    int        npatch_jumps;
+    PatchConst patch_consts[MAX_PATCH];
+    int        npatch_consts;
+    sljit_sw   patch_exec_off;
+    unsigned long last_gen_size;
+    struct sljit_jump  *pend_jumps[MAX_PATCH];
+    char   pend_jump_names[MAX_PATCH][32];
+    int    n_pend_jumps;
+    struct sljit_const *pend_consts[MAX_PATCH];
+    char   pend_const_names[MAX_PATCH][32];
+    sljit_s32 pend_const_ops[MAX_PATCH];
+    int    n_pend_consts;
+    sljit_s32 cur_ret;
+    sljit_s32 cur_argtypes;
+    int       cur_nargs;
+
+    /* SEE compile log */
+    char  lbuf[4096];
+    int   llen;
+};
+extern struct Ir g_ir;
+
+/* ---- process-wide shared state (dynamic libs, include tracking, markers) */
+struct Shared {
+    MarkerState markers[MAX_MARKERS];
+    int    nmarkers;
+    DynLib dynlibs[MAX_DYNLIB];
+    int    nlibs;
+    DynSym dynsyms[MAX_DYNSYM];
+    int    nsyms;
+    char   dyn_err[256];
+    char   loaded[MAX_LOADED][256];
+    int    nloaded;
+};
+extern struct Shared g_sh;
 
 /* ---- stable-address arena -------------------------------------------- */
 /* Blocks are malloc'd and never moved nor returned to the OS; freeing is
@@ -158,11 +223,10 @@ struct forth {
     Word *W_EXIT, *W_LIT, *W_BRANCH, *W_0BRANCH, *W_ABORTQ, *W_DOES;
     Word *W_DO, *W_LOOP, *W_PLOOP, *W_QDO, *W_LEAVE;
     Word *W_LOCAL, *W_LOCALS_ENTER, *W_LOCALS_EXIT, *W_LOCAL_STORE;
-    MarkerState markers[MAX_MARKERS];
-    int nmarkers;
 
-    /* locals */
-    cell        locals[LOCALS_MAX];
+    /* locals: lazily-committed region (stable base), not an inline array */
+    Region      locals_r;
+    cell       *locals;
     int         lfbase;
     int         lfree;
     LocalsState cur_locals;
@@ -173,14 +237,9 @@ struct forth {
     char  rline[4096];          /* buffer for READ-LINE */
     int   cond_skip, cond_depth;
 
-    /* compile log (SEE) */
-    char lbuf[4096];
-    int  llen;
 
     /* per-context scratch buffers (previously function-local statics) */
     char pn[NAME_LEN];              /* PARSE-NAME */
-    char inline_toks[2048][64];     /* expand_body tokenizer */
-    char ir_raw[MAX_IRTOK][64];     /* ir_tokenize raw body */
     char quote_ring[8][1024];       /* S" literal ring */
     int  quote_ri;
     char abq[1024];                 /* ABORT" */
@@ -192,57 +251,12 @@ struct forth {
     int     booting;
     cell    err_code;
     char    err_msg[256];
-    XFrame  xframes[MAX_XFRAME];
+    Region  xframes_r;
+    XFrame *xframes;
     int     xsp;
 
-    /* generated code registry */
-    void *jit_codes[MAX_JIT];
-    int   njit;
 
-    /* SLJIT assembler */
-    struct sljit_compiler *jcomp;
-    Word *jit_exit;
-    char  irbuf[IRBUF_SIZE];
-    int   irlen;
-    char  irtok[MAX_IRTOK][64];
-    int   irtok_count;
-    int   irtok_pos;
-    char  label_names[MAX_IRLAB][32];
-    struct sljit_label *label_ptrs[MAX_IRLAB];
-    int   nlabels;
-    char  jump_names[MAX_IRJMP][32];
-    struct sljit_jump  *jump_ptrs[MAX_IRJMP];
-    int   njumps;
-    int   forth_abi, forth_local, entered, returned;
-    int   enter_fsc, enter_fsv, enter_vsc, enter_vsv;
-    PatchJump  patch_jumps[MAX_PATCH];
-    int        npatch_jumps;
-    PatchConst patch_consts[MAX_PATCH];
-    int        npatch_consts;
-    sljit_sw   patch_exec_off;
-    unsigned long last_gen_size;
-    struct sljit_jump  *pend_jumps[MAX_PATCH];
-    char   pend_jump_names[MAX_PATCH][32];
-    int    n_pend_jumps;
-    struct sljit_const *pend_consts[MAX_PATCH];
-    char   pend_const_names[MAX_PATCH][32];
-    sljit_s32 pend_const_ops[MAX_PATCH];
-    int    n_pend_consts;
-    sljit_s32 cur_ret;
-    sljit_s32 cur_argtypes;
-    int       cur_nargs;
-    int    inline_id, inline_depth;
 
-    /* dynamic linking */
-    DynLib dynlibs[MAX_DYNLIB];
-    int    nlibs;
-    DynSym dynsyms[MAX_DYNSYM];
-    int    nsyms;
-    char   dyn_err[256];
-
-    /* INCLUDEd / REQUIREd files */
-    char   loaded[MAX_LOADED][256];
-    int    nloaded;
 };
 
 typedef struct { const char *name; long val; } NameVal;

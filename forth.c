@@ -22,6 +22,8 @@
 
 /* pool size, set by pool_start; exposed to CODE via the &nworkers symbol */
 int g_nworkers;
+struct Ir g_ir;
+struct Shared g_sh;
 
 /* target architecture code exposed to Forth as ARCH */
 #if (defined SLJIT_CONFIG_X86_64 && SLJIT_CONFIG_X86_64)
@@ -85,7 +87,7 @@ static void set_err(struct forth *F, int code, const char *msg) {
 
 static void raise(struct forth *F, int code, const char *msg) {
     set_err(F, code, msg);
-    if (F->jcomp) { sljit_free_compiler(F->jcomp); F->jcomp = NULL; }
+    if (g_ir.jcomp) { sljit_free_compiler(g_ir.jcomp); g_ir.jcomp = NULL; }
     if (F->xsp > 0) {
         XFrame *f = &F->xframes[F->xsp - 1];
         f->fx_code = code;
@@ -171,13 +173,14 @@ static void compile_xt(struct forth *F, Word *w) { emit(F, (cell)w); }
 /* ---- compile log: reconstruct source for SEE -------------------------- */
 
 
-static void log_reset(struct forth *F) { F->llen = 0; F->lbuf[0] = 0; }
+static void log_reset(struct forth *F) { (void)F; g_ir.llen = 0; g_ir.lbuf[0] = 0; }
 
 static void log_put(struct forth *F, const char *s) {
+    (void)F;
     int n = (int)strlen(s);
-    if (F->llen && F->llen + n + 2 < (int)sizeof F->lbuf) F->lbuf[F->llen++] = ' ';
-    if (F->llen + n + 1 < (int)sizeof F->lbuf) { memcpy(F->lbuf + F->llen, s, (size_t)n); F->llen += n; }
-    F->lbuf[F->llen] = 0;
+    if (g_ir.llen && g_ir.llen + n + 2 < (int)sizeof g_ir.lbuf) g_ir.lbuf[g_ir.llen++] = ' ';
+    if (g_ir.llen + n + 1 < (int)sizeof g_ir.lbuf) { memcpy(g_ir.lbuf + g_ir.llen, s, (size_t)n); g_ir.llen += n; }
+    g_ir.lbuf[g_ir.llen] = 0;
 }
 
 /* ---- stable-address arena -------------------------------------------- */
@@ -213,6 +216,27 @@ static void arena_destroy(Arena *a) {
     while (b) { ArenaBlock *n = b->next; free(b); b = n; }
     a->head = a->cur = NULL;
 }
+
+/* ---- object pool: arena storage + intrusive free list ----------------- */
+/* An object keeps a `void *` as its first field (the free-list link while it
+   is freed).  Addresses stay stable, so pools can hold pthread-carrying
+   objects, and free/alloc are O(1) with no per-object malloc. */
+typedef struct { Arena a; void *free_head; size_t size; } Pool;
+
+static void pool_init(Pool *p, size_t size, size_t block) {
+    arena_init(&p->a, block);
+    p->free_head = NULL;
+    p->size = size;
+}
+static void *pool_alloc(Pool *p) {
+    if (p->free_head) { void *o = p->free_head; p->free_head = *(void **)o; return o; }
+    return arena_alloc(&p->a, p->size);
+}
+static void pool_free(Pool *p, void *o) {
+    *(void **)o = p->free_head;
+    p->free_head = o;
+}
+static void pool_destroy(Pool *p) { arena_destroy(&p->a); p->free_head = NULL; }
 
 /* ---- contiguous growable region -------------------------------------- */
 static int region_init(Region *r, size_t reserve) {
@@ -401,7 +425,7 @@ static void p_semicolon(struct forth *F) {
         F->compiling->body_end = F->root->here;
         F->compiling->flags &= ~F_HIDDEN;
         free(F->compiling->src);
-        F->compiling->src = strdup(F->lbuf);
+        F->compiling->src = strdup(g_ir.lbuf);
     }
     F->compiling = NULL;
     F->state = 0;
@@ -419,11 +443,15 @@ static void p_locals_enter(struct forth *F) {
     cell no = pop(F);
     cell ni = pop(F);
     if (ni < 0 || no < 0) throw_error(F, "bad locals frame");
-    if (F->lfree + (int)(ni + no) > LOCALS_MAX) throw_error(F, "too many locals");
+    if ((size_t)(F->lfree + (int)(ni + no)) * sizeof(cell) > F->locals_r.reserved)
+        throw_error(F, "too many locals");
     rpush(F, F->lfbase);
     rpush(F, F->lfree);
     F->lfbase = F->lfree;
     F->lfree += (int)(ni + no);
+    if (!region_ensure(&F->locals_r, (size_t)F->lfree * sizeof(cell)))
+        throw_error(F, "locals out of memory");
+    F->locals = (cell *)F->locals_r.base;
     for (cell i = 0; i < ni; i++) F->locals[F->lfbase + (ni - 1 - i)] = pop(F);
     for (cell i = ni; i < ni + no; i++) F->locals[F->lfbase + i] = 0;
 }
@@ -705,14 +733,14 @@ static void p_marker_run(struct forth *F) {
     struct forth *R = F->root;
     mem_lock();
     int idx = (int)F->curr->data;
-    if (idx < 0 || idx >= R->nmarkers) { mem_unlock(); throw_error(F, "bad marker"); }
-    MarkerState *m = &R->markers[idx];
+    if (idx < 0 || idx >= g_sh.nmarkers) { mem_unlock(); throw_error(F, "bad marker"); }
+    MarkerState *m = &g_sh.markers[idx];
     for (Word *w = R->latest; w != m->mk_latest; w = w->link) { free(w->irbody); free(w->src); }
     R->nwords = m->mk_nwords;
     R->latest = m->mk_latest;
     R->memtop = m->mk_memtop;
     R->here = m->mk_here;
-    R->nmarkers = idx;
+    g_sh.nmarkers = idx;
     mem_unlock();
     F->compiling = NULL;
     F->state = 0;
@@ -723,14 +751,14 @@ static void p_marker(struct forth *F) {
     if (!next_token(F, name)) throw_error(F, "name expected after MARKER");
     struct forth *R = F->root;
     mem_lock();
-    if (R->nmarkers >= MAX_MARKERS) { mem_unlock(); throw_error(F, "too many markers"); }
-    int idx = R->nmarkers;
-    MarkerState *m = &R->markers[idx];
+    if (g_sh.nmarkers >= MAX_MARKERS) { mem_unlock(); throw_error(F, "too many markers"); }
+    int idx = g_sh.nmarkers;
+    MarkerState *m = &g_sh.markers[idx];
     m->mk_nwords = R->nwords;
     m->mk_latest = R->latest;
     m->mk_memtop = R->memtop;
     m->mk_here = R->here;
-    R->nmarkers = idx + 1;
+    g_sh.nmarkers = idx + 1;
     mem_unlock();
     Word *w = newword(F, name, p_marker_run);
     w->data = idx;
@@ -956,7 +984,7 @@ static void jit_emit_ret(struct forth *F, struct sljit_compiler *c) {
    Bodies with DO/LOOP are left to the VM. Returns NULL on failure. */
 static void *jit_compile(struct forth *F, Word *w) {
     if (!w || w->body < 0 || w->body_end <= w->body) return NULL;
-    if (!F->jit_exit) F->jit_exit = find(F, "EXIT");
+    if (!g_ir.jit_exit) g_ir.jit_exit = find(F, "EXIT");
 
     cell start = w->body, end = w->body_end;
     cell n = end - start;
@@ -1020,7 +1048,7 @@ static void *jit_compile(struct forth *F, Word *w) {
             if (labels[t - start]) sljit_set_label(j, labels[t - start]);
             else { jr[njr].j = j; jr[njr].target = t; njr++; }
             pc += 2;
-        } else if (x == F->W_EXIT || (F->jit_exit && x == F->jit_exit)) {
+        } else if (x == F->W_EXIT || (g_ir.jit_exit && x == g_ir.jit_exit)) {
             jit_emit_ret(F, c);
             pc += 1;
         } else if (x->code == p_native && x->native) {
@@ -1065,7 +1093,7 @@ static void *jit_compile(struct forth *F, Word *w) {
     sljit_free_compiler(c);
     free(istarget); free(labels); free(jr);
     if (!jit) return NULL;
-    if (F->njit < MAX_JIT) F->jit_codes[F->njit++] = jit;
+    if (g_ir.njit < MAX_JIT) g_ir.jit_codes[g_ir.njit++] = jit;
     return jit;
 }
 
@@ -1125,44 +1153,45 @@ static void interpret_token(struct forth *F, const char *tok) {
 
 
 static void dyn_seterr(struct forth *F, const char *m) {
+    (void)F;
     if (!m) m = "unknown dl error";
-    strncpy(F->dyn_err, m, sizeof F->dyn_err - 1);
-    F->dyn_err[sizeof F->dyn_err - 1] = 0;
+    strncpy(g_sh.dyn_err, m, sizeof g_sh.dyn_err - 1);
+    g_sh.dyn_err[sizeof g_sh.dyn_err - 1] = 0;
 }
 
 /* open a library, reusing an existing handle; errors are reported via dyn_err */
 void *dyn_open(struct forth *F, const char *name, int flags) {
-    for (int i = 0; i < F->nlibs; i++)
-        if (strcmp(F->dynlibs[i].name, name) == 0) return F->dynlibs[i].handle;
-    if (F->nlibs >= MAX_DYNLIB) { dyn_seterr(F, "too many libraries"); return NULL; }
+    for (int i = 0; i < g_sh.nlibs; i++)
+        if (strcmp(g_sh.dynlibs[i].name, name) == 0) return g_sh.dynlibs[i].handle;
+    if (g_sh.nlibs >= MAX_DYNLIB) { dyn_seterr(F, "too many libraries"); return NULL; }
     dlerror();
     void *h = dlopen(name, flags);
     if (!h) { const char *e = dlerror(); dyn_seterr(F, e ? e : "dlopen failed"); return NULL; }
-    strncpy(F->dynlibs[F->nlibs].name, name, DYN_NAME - 1);
-    F->dynlibs[F->nlibs].name[DYN_NAME - 1] = 0;
-    F->dynlibs[F->nlibs].handle = h;
-    F->dynlibs[F->nlibs].flags = flags;
-    F->nlibs++;
-    F->dyn_err[0] = 0;
+    strncpy(g_sh.dynlibs[g_sh.nlibs].name, name, DYN_NAME - 1);
+    g_sh.dynlibs[g_sh.nlibs].name[DYN_NAME - 1] = 0;
+    g_sh.dynlibs[g_sh.nlibs].handle = h;
+    g_sh.dynlibs[g_sh.nlibs].flags = flags;
+    g_sh.nlibs++;
+    g_sh.dyn_err[0] = 0;
     return h;
 }
 
 /* resolve a symbol in a handle, with a cache; NULL on failure */
 static void *dyn_sym(struct forth *F, void *handle, const char *name) {
-    for (int i = 0; i < F->nsyms; i++)
-        if (F->dynsyms[i].handle == handle && strcmp(F->dynsyms[i].name, name) == 0)
-            return F->dynsyms[i].addr;
-    if (F->nsyms >= MAX_DYNSYM) { dyn_seterr(F, "too many symbols"); return NULL; }
+    for (int i = 0; i < g_sh.nsyms; i++)
+        if (g_sh.dynsyms[i].handle == handle && strcmp(g_sh.dynsyms[i].name, name) == 0)
+            return g_sh.dynsyms[i].addr;
+    if (g_sh.nsyms >= MAX_DYNSYM) { dyn_seterr(F, "too many symbols"); return NULL; }
     dlerror();
     void *a = dlsym(handle, name);
     const char *e = dlerror();
     if (e) { dyn_seterr(F, e); return NULL; }
-    F->dynsyms[F->nsyms].handle = handle;
-    strncpy(F->dynsyms[F->nsyms].name, name, DYN_NAME - 1);
-    F->dynsyms[F->nsyms].name[DYN_NAME - 1] = 0;
-    F->dynsyms[F->nsyms].addr = a;
-    F->nsyms++;
-    F->dyn_err[0] = 0;
+    g_sh.dynsyms[g_sh.nsyms].handle = handle;
+    strncpy(g_sh.dynsyms[g_sh.nsyms].name, name, DYN_NAME - 1);
+    g_sh.dynsyms[g_sh.nsyms].name[DYN_NAME - 1] = 0;
+    g_sh.dynsyms[g_sh.nsyms].addr = a;
+    g_sh.nsyms++;
+    g_sh.dyn_err[0] = 0;
     return a;
 }
 
@@ -1177,19 +1206,20 @@ void *dyn_resolve(struct forth *F, const char *lib, const char *name) {
 }
 
 static void dyn_forget_handle(struct forth *F, void *handle) {
+    (void)F;
     int j = 0;
-    for (int i = 0; i < F->nsyms; i++)
-        if (F->dynsyms[i].handle != handle) F->dynsyms[j++] = F->dynsyms[i];
-    F->nsyms = j;
+    for (int i = 0; i < g_sh.nsyms; i++)
+        if (g_sh.dynsyms[i].handle != handle) g_sh.dynsyms[j++] = g_sh.dynsyms[i];
+    g_sh.nsyms = j;
 }
 
 void dyn_close(struct forth *F, void *handle) {
-    for (int i = 0; i < F->nlibs; i++) {
-        if (F->dynlibs[i].handle == handle) {
+    for (int i = 0; i < g_sh.nlibs; i++) {
+        if (g_sh.dynlibs[i].handle == handle) {
             dyn_forget_handle(F, handle);
             dlclose(handle);
-            for (int j = i; j < F->nlibs - 1; j++) F->dynlibs[j] = F->dynlibs[j + 1];
-            F->nlibs--;
+            for (int j = i; j < g_sh.nlibs - 1; j++) g_sh.dynlibs[j] = g_sh.dynlibs[j + 1];
+            g_sh.nlibs--;
             return;
         }
     }
@@ -1198,9 +1228,10 @@ void dyn_close(struct forth *F, void *handle) {
 }
 
 static void dyn_close_all(struct forth *F) {
-    for (int i = F->nlibs - 1; i >= 0; i--) dlclose(F->dynlibs[i].handle);
-    F->nlibs = 0;
-    F->nsyms = 0;
+    (void)F;
+    for (int i = g_sh.nlibs - 1; i >= 0; i--) dlclose(g_sh.dynlibs[i].handle);
+    g_sh.nlibs = 0;
+    g_sh.nsyms = 0;
 }
 
 /* copy a Forth ( addr len ) string into a NUL-terminated buffer */
@@ -1220,14 +1251,14 @@ static void p_code(struct forth *F) {
     Word *w = newword(F, name, p_native);
     w->flags |= F_HIDDEN;
     F->compiling = w;
-    F->irlen = 0;
-    F->irbuf[0] = 0;
+    g_ir.irlen = 0;
+    g_ir.irbuf[0] = 0;
     F->state = 2;
 }
 
 static void p_endcode(struct forth *F) {
     if (F->state != 2) throw_error(F, ";CODE without CODE");
-    char *body = strdup(F->irbuf);         /* keep the IR source for INLINE */
+    char *body = strdup(g_ir.irbuf);         /* keep the IR source for INLINE */
     void *code = ir_compile(F, 1, 0);
     if (F->compiling) {
         F->compiling->native = code;
@@ -1285,9 +1316,9 @@ static void p_assemble(struct forth *F) {
     cell len = pop(F);
     char *a = (char *)pop(F);
     if (len < 0 || len >= IRBUF_SIZE) throw_error(F, "bad IR length");
-    memcpy(F->irbuf, a, (size_t)len);
-    F->irbuf[len] = 0;
-    F->irlen = (int)len;
+    memcpy(g_ir.irbuf, a, (size_t)len);
+    g_ir.irbuf[len] = 0;
+    g_ir.irlen = (int)len;
     void *code = ir_compile(F, 0, 0);
     push(F, (cell)code);
 }
@@ -1358,7 +1389,9 @@ static void p_execute(struct forth *F) {
 
 static void p_catch(struct forth *F) {
     Word *w = (Word *)pop(F);
-    if (F->xsp >= MAX_XFRAME) raise(F, ERR_GENERIC, "too many CATCH frames");
+    if (!region_ensure(&F->xframes_r, (size_t)(F->xsp + 1) * sizeof(XFrame)))
+        raise(F, ERR_GENERIC, "CATCH frames out of memory");
+    F->xframes = (XFrame *)F->xframes_r.base;
     XFrame *f = &F->xframes[F->xsp++];
     f->fx_sp = F->sp; f->fx_rp = F->rp; f->fx_ip = F->ip; f->fx_state = F->state; f->fx_compiling = F->compiling;
     if (setjmp(f->env) == 0) {
@@ -1369,7 +1402,7 @@ static void p_catch(struct forth *F) {
     } else {
         F->sp = f->fx_sp; F->rp = f->fx_rp; F->ip = f->fx_ip;
         F->state = f->fx_state; F->compiling = f->fx_compiling;
-        if (F->jcomp) { sljit_free_compiler(F->jcomp); F->jcomp = NULL; }
+        if (g_ir.jcomp) { sljit_free_compiler(g_ir.jcomp); g_ir.jcomp = NULL; }
         F->xsp--;
         push(F, f->fx_code);
     }
@@ -1463,13 +1496,14 @@ static void p_dlsym(struct forth *F) {
 static void p_dlclose(struct forth *F) { dyn_close(F, (void *)pop(F)); }
 
 static void p_dlerror(struct forth *F) {
-    push(F, (cell)(intptr_t)F->dyn_err);
-    push(F, (cell)strlen(F->dyn_err));
+    push(F, (cell)(intptr_t)g_sh.dyn_err);
+    push(F, (cell)strlen(g_sh.dyn_err));
 }
 
 static void p_dllibs(struct forth *F) {
-    for (int i = 0; i < F->nlibs; i++)
-        printf("%s %p\n", F->dynlibs[i].name, (void *)F->dynlibs[i].handle);
+    (void)F;
+    for (int i = 0; i < g_sh.nlibs; i++)
+        printf("%s %p\n", g_sh.dynlibs[i].name, (void *)g_sh.dynlibs[i].handle);
 }
 
 /* ---- runtime patching / introspection --------------------------------- */
@@ -1479,9 +1513,9 @@ static void p_set_jump_addr(struct forth *F) {
     cell addr = pop(F);
     char name[32];
     if (!copy_cstr(addr, len, name, (int)sizeof name)) throw_error(F, "bad name");
-    for (int i = 0; i < F->npatch_jumps; i++)
-        if (strcmp(F->patch_jumps[i].name, name) == 0) {
-            sljit_set_jump_addr(F->patch_jumps[i].addr, (sljit_uw)target, F->patch_exec_off);
+    for (int i = 0; i < g_ir.npatch_jumps; i++)
+        if (strcmp(g_ir.patch_jumps[i].name, name) == 0) {
+            sljit_set_jump_addr(g_ir.patch_jumps[i].addr, (sljit_uw)target, g_ir.patch_exec_off);
             return;
         }
     throw_error(F, "set-jump-addr: unknown name");
@@ -1493,16 +1527,16 @@ static void p_set_const(struct forth *F) {
     cell addr = pop(F);
     char name[32];
     if (!copy_cstr(addr, len, name, (int)sizeof name)) throw_error(F, "bad name");
-    for (int i = 0; i < F->npatch_consts; i++)
-        if (strcmp(F->patch_consts[i].name, name) == 0) {
-            sljit_set_const(F->patch_consts[i].addr, F->patch_consts[i].op, (sljit_sw)value, F->patch_exec_off);
+    for (int i = 0; i < g_ir.npatch_consts; i++)
+        if (strcmp(g_ir.patch_consts[i].name, name) == 0) {
+            sljit_set_const(g_ir.patch_consts[i].addr, g_ir.patch_consts[i].op, (sljit_sw)value, g_ir.patch_exec_off);
             return;
         }
     throw_error(F, "set-const: unknown name");
 }
 
 static void p_cpu_feature(struct forth *F) { push(F, (cell)sljit_has_cpu_feature((sljit_s32)pop(F))); }
-static void p_jit_size(struct forth *F) { push(F, (cell)F->last_gen_size); }
+static void p_jit_size(struct forth *F) { push(F, (cell)g_ir.last_gen_size); }
 
 static void p_native(struct forth *F) {
     typedef cell *(*Nat)(cell *, struct forth *);
@@ -1522,7 +1556,7 @@ static void p_native(struct forth *F) {
 /*  code region, data space and dictionary of the root context.          */
 /* ===================================================================== */
 #define MAX_WORKERS 64
-#define DEQ_CAP     (1 << 16)
+#define DEQ_RESERVE ((size_t)1 << 20)   /* 8 MiB virtual ring per worker deque */
 
 typedef struct Task {
     struct forth *ctx;
@@ -1532,7 +1566,9 @@ typedef struct Task {
     char          err_msg[128];
 } Task;
 
-typedef struct { Task *buf[DEQ_CAP]; int head, tail; } Deque;
+/* growable, stable-base ring: reserves address space and commits pages on
+   demand, so idle workers cost nothing and there is no fixed slot cap */
+typedef struct { Region r; Task **buf; size_t cap, head, tail; } Deque;
 typedef struct { Deque dq; pthread_t th; int id; } Worker;
 
 static Worker          g_workers[MAX_WORKERS];
@@ -1563,14 +1599,20 @@ static struct forth *forth_task_new(struct forth *F) {
     T->W_LOCAL = F->W_LOCAL; T->W_LOCALS_ENTER = F->W_LOCALS_ENTER;
     T->W_LOCALS_EXIT = F->W_LOCALS_EXIT; T->W_LOCAL_STORE = F->W_LOCAL_STORE;
     if (!region_init(&T->dstack_r, STACK_RESERVE) ||
-        !region_init(&T->rstack_r, STACK_RESERVE)) {
+        !region_init(&T->rstack_r, STACK_RESERVE) ||
+        !region_init(&T->locals_r, LOCALS_RESERVE * sizeof(cell)) ||
+        !region_init(&T->xframes_r, XFRAME_RESERVE * sizeof(XFrame))) {
         region_destroy(&T->dstack_r);
         region_destroy(&T->rstack_r);
+        region_destroy(&T->locals_r);
+        region_destroy(&T->xframes_r);
         free(T);
         throw_error(F, "cannot reserve task stacks");
     }
     T->dstack = (cell *)T->dstack_r.base;
     T->rstack = (cell *)T->rstack_r.base;
+    T->locals = (cell *)T->locals_r.base;
+    T->xframes = (XFrame *)T->xframes_r.base;
     T->sp = T->rp = 0;
     T->ip = -1;
     T->inbuf_ptr = T->inbuf;
@@ -1580,6 +1622,8 @@ static struct forth *forth_task_new(struct forth *F) {
 static void forth_task_free(struct forth *T) {
     region_destroy(&T->dstack_r);
     region_destroy(&T->rstack_r);
+    region_destroy(&T->locals_r);
+    region_destroy(&T->xframes_r);
     free(T);
 }
 
@@ -1600,19 +1644,23 @@ static void task_run(Task *t) {
 }
 
 /* all deque operations are serialized by g_meta */
-static void   deq_push(Deque *d, Task *t) { d->buf[d->tail] = t; d->tail = (d->tail + 1) % DEQ_CAP; }
-static Task  *deq_pop(Deque *d)  { if (d->head == d->tail) return NULL; d->tail = (d->tail + DEQ_CAP - 1) % DEQ_CAP; return d->buf[d->tail]; }
-static Task  *deq_steal(Deque *d){ if (d->head == d->tail) return NULL; Task *t = d->buf[d->head]; d->head = (d->head + 1) % DEQ_CAP; return t; }
+static Task *deq_pop(Deque *d)  { if (d->head == d->tail) return NULL; d->tail = (d->tail + d->cap - 1) % d->cap; return d->buf[d->tail]; }
+static Task *deq_steal(Deque *d){ if (d->head == d->tail) return NULL; Task *t = d->buf[d->head]; d->head = (d->head + 1) % d->cap; return t; }
 
 static void task_enqueue(struct forth *F, Task *t) {
     pthread_mutex_lock(&g_meta);
     int target = g_rr++ % g_nworkers;
     Deque *d = &g_workers[target].dq;
-    if ((d->tail + 1) % DEQ_CAP == d->head) {
+    if ((d->tail + 1) % d->cap == d->head) {
         pthread_mutex_unlock(&g_meta);
         throw_error(F, "task queue full");
     }
-    deq_push(d, t);
+    if (!region_ensure(&d->r, (d->tail + 1) * sizeof(Task *))) {
+        pthread_mutex_unlock(&g_meta);
+        throw_error(F, "task queue out of memory");
+    }
+    d->buf[d->tail] = t;
+    d->tail = (d->tail + 1) % d->cap;
     g_active++;
     pthread_cond_signal(&g_work);
     pthread_mutex_unlock(&g_meta);
@@ -1677,7 +1725,14 @@ static void pool_start(int n) {
     g_nworkers = n; atomic_store(&g_stop, 0); g_active = 0; g_rr = 0;
     for (int i = 0; i < n; i++) {
         g_workers[i].id = i;
-        g_workers[i].dq.head = g_workers[i].dq.tail = 0;
+        Deque *d = &g_workers[i].dq;
+        if (!d->buf) {
+            if (!region_init(&d->r, DEQ_RESERVE * sizeof(Task *)))
+                continue;                       /* leave this worker deque unusable */
+            d->buf = (Task **)d->r.base;
+            d->cap = DEQ_RESERVE;
+        }
+        d->head = d->tail = 0;
     }
     int started = 0;
     for (int i = 0; i < n; i++)
@@ -1696,6 +1751,10 @@ static void pool_stop(void) {
     pthread_mutex_unlock(&g_meta);
     channels_wake_all();               /* release workers parked on a channel */
     for (int i = 0; i < g_nworkers; i++) pthread_join(g_workers[i].th, NULL);
+    for (int i = 0; i < g_nworkers; i++) {
+        region_destroy(&g_workers[i].dq.r);
+        g_workers[i].dq.buf = NULL;
+    }
     g_pool_on = 0;
 }
 
@@ -1778,32 +1837,54 @@ static void p_task_word(struct forth *F) {
    CAS ( old new addr -- prev )  compare-and-swap: stores new if *addr==old */
 
 /* ---- channels (Go-style, shared-memory) ------------------------------ */
-#define MAX_CHANS 4096
+/* Channels live in a pool (arena + free list): stable addresses (needed for
+   the pthread primitives), individual free via CHAN-FREE, no fixed cap.  An
+   intrusive live list lets shutdown wake/destroy every open channel. */
 typedef struct Chan {
-    pthread_mutex_t m;
-    pthread_cond_t  cv;
+    void            *pool_next;         /* first field: free-list link */
+    struct Chan     *live_next, *live_prev;
+    pthread_mutex_t  m;
+    pthread_cond_t   cv;
     int   cap, count, head, tail;
     int   closed;
     cell *buf;
 } Chan;
 
-static Chan  *g_chans[MAX_CHANS];
-static int    g_nchans;
+static Pool   g_chan_pool;
+static Chan  *g_chans;      /* live list head */
+static int    g_nchans;     /* live count */
+
+static void chan_link(Chan *c) {
+    c->live_prev = NULL; c->live_next = g_chans;
+    if (g_chans) g_chans->live_prev = c;
+    g_chans = c; g_nchans++;
+}
+static void chan_unlink(Chan *c) {
+    if (c->live_prev) c->live_prev->live_next = c->live_next;
+    else g_chans = c->live_next;
+    if (c->live_next) c->live_next->live_prev = c->live_prev;
+    g_nchans--;
+}
 
 static void p_chan(struct forth *F) {
     cell cap = pop(F);
     if (cap < 0) throw_error(F, "CHAN: bad capacity");
-    Chan *c = calloc(1, sizeof *c);
+    pthread_mutex_lock(&g_meta);
+    Chan *c = pool_alloc(&g_chan_pool);
+    if (c) chan_link(c);
+    pthread_mutex_unlock(&g_meta);
     if (!c) throw_error(F, "CHAN: out of memory");
     pthread_mutex_init(&c->m, NULL);
-    c->cap = (int)cap;
     pthread_cond_init(&c->cv, NULL);
+    c->cap = (int)cap;
+    c->count = c->head = c->tail = 0;
+    c->closed = 0;
     c->buf = malloc((size_t)(cap > 0 ? cap : 1) * sizeof(cell));
-    if (!c->buf) { pthread_cond_destroy(&c->cv); pthread_mutex_destroy(&c->m); free(c); throw_error(F, "CHAN: out of memory"); }
-    pthread_mutex_lock(&g_meta);
-    if (g_nchans >= MAX_CHANS) { pthread_mutex_unlock(&g_meta); free(c->buf); pthread_cond_destroy(&c->cv); pthread_mutex_destroy(&c->m); free(c); throw_error(F, "CHAN: too many"); }
-    g_chans[g_nchans++] = c;
-    pthread_mutex_unlock(&g_meta);
+    if (!c->buf) {
+        pthread_cond_destroy(&c->cv); pthread_mutex_destroy(&c->m);
+        pthread_mutex_lock(&g_meta); chan_unlink(c); pool_free(&g_chan_pool, c); pthread_mutex_unlock(&g_meta);
+        throw_error(F, "CHAN: out of memory");
+    }
     push(F, (cell)(intptr_t)c);
 }
 
@@ -1857,20 +1938,34 @@ static void p_chan_close(struct forth *F) {
     pthread_mutex_unlock(&c->m);
 }
 
+/* CHAN-FREE ( ch -- ) : only safe when no task is blocked on the channel */
+static void p_chan_free(struct forth *F) {
+    Chan *c = (Chan *)(intptr_t)pop(F);
+    if (!c) throw_error(F, "CHAN-FREE: bad channel");
+    pthread_mutex_lock(&g_meta);
+    chan_unlink(c);
+    pthread_cond_destroy(&c->cv);
+    pthread_mutex_destroy(&c->m);
+    free(c->buf);
+    pool_free(&g_chan_pool, c);
+    pthread_mutex_unlock(&g_meta);
+}
+
 static void channels_wake_all(void) {
     pthread_mutex_lock(&g_meta);
-    for (int i = 0; i < g_nchans; i++) pthread_cond_broadcast(&g_chans[i]->cv);
+    for (Chan *c = g_chans; c; c = c->live_next) pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&g_meta);
 }
 
 static void channels_free(void) {
-    for (int i = 0; i < g_nchans; i++) {
-        pthread_cond_destroy(&g_chans[i]->cv);
-        pthread_mutex_destroy(&g_chans[i]->m);
-        free(g_chans[i]->buf);
-        free(g_chans[i]);
+    for (Chan *c = g_chans; c; c = c->live_next) {
+        pthread_cond_destroy(&c->cv);
+        pthread_mutex_destroy(&c->m);
+        free(c->buf);
     }
+    g_chans = NULL;
     g_nchans = 0;
+    pool_destroy(&g_chan_pool);
 }
 
 /* ===================================================================== */
@@ -2004,6 +2099,7 @@ static void init_dict(struct forth *F) {
     define_prim(F, ">CHAN", p_chan_send);
     define_prim(F, "CHAN>", p_chan_recv);
     define_prim(F, "CHAN-CLOSE", p_chan_close);
+    define_prim(F, "CHAN-FREE", p_chan_free);
 
     for (int i = 0; sljit_consts[i].name; i++) {
         Word *cw = define_prim(F, sljit_consts[i].name, p_push_const);
@@ -2117,13 +2213,13 @@ static void p_include(struct forth *F) {
 static void p_require(struct forth *F) {
     char name[256];
     if (!next_token_n(F, name, sizeof name)) throw_error(F, "REQUIRE needs a file name");
-    for (int i = 0; i < F->nloaded; i++)
-        if (strcmp(F->loaded[i], name) == 0) return;
+    for (int i = 0; i < g_sh.nloaded; i++)
+        if (strcmp(g_sh.loaded[i], name) == 0) return;
     include_file(F, name);
-    if (F->nloaded < MAX_LOADED) {
-        strncpy(F->loaded[F->nloaded], name, sizeof F->loaded[0] - 1);
-        F->loaded[F->nloaded][sizeof F->loaded[0] - 1] = 0;
-        F->nloaded++;
+    if (g_sh.nloaded < MAX_LOADED) {
+        strncpy(g_sh.loaded[g_sh.nloaded], name, sizeof g_sh.loaded[0] - 1);
+        g_sh.loaded[g_sh.nloaded][sizeof g_sh.loaded[0] - 1] = 0;
+        g_sh.nloaded++;
     }
 }
 
@@ -2188,17 +2284,22 @@ int main(int argc, char **argv) {
     if (!F) { fputs("cannot allocate interpreter state\n", stderr); return 1; }
     F->root = F;
     mem_mutex_init();
+    pool_init(&g_chan_pool, sizeof(Chan), 1u << 16);
     arena_init(&F->heap, 1u << 20);
     arena_init(&F->words, 1u << 20);
     if (!region_init(&F->data, (size_t)1 << 30) ||
         !region_init(&F->code_r, CODE_RESERVE) ||
         !region_init(&F->dstack_r, STACK_RESERVE) ||
-        !region_init(&F->rstack_r, STACK_RESERVE)) {
+        !region_init(&F->rstack_r, STACK_RESERVE) ||
+        !region_init(&F->locals_r, LOCALS_RESERVE * sizeof(cell)) ||
+        !region_init(&F->xframes_r, XFRAME_RESERVE * sizeof(XFrame))) {
         fputs("cannot reserve memory regions\n", stderr);
         return 1;
     }
     F->dstack = (cell *)F->dstack_r.base;
     F->rstack = (cell *)F->rstack_r.base;
+    F->locals = (cell *)F->locals_r.base;
+    F->xframes = (XFrame *)F->xframes_r.base;
     F->fcode = (cell *)F->code_r.base;
 
     F->inbuf_ptr = F->inbuf;
@@ -2236,7 +2337,7 @@ int main(int argc, char **argv) {
 
     pool_stop();
     channels_free();
-    for (int i = 0; i < F->njit; i++) sljit_free_code(F->jit_codes[i], NULL);
+    for (int i = 0; i < g_ir.njit; i++) sljit_free_code(g_ir.jit_codes[i], NULL);
     for (Word *w = F->latest; w; w = w->link) { free(w->irbody); free(w->src); }
     region_destroy(&F->code_r);
     arena_destroy(&F->heap);
@@ -2244,6 +2345,8 @@ int main(int argc, char **argv) {
     region_destroy(&F->data);
     region_destroy(&F->dstack_r);
     region_destroy(&F->rstack_r);
+    region_destroy(&F->locals_r);
+    region_destroy(&F->xframes_r);
     dyn_close_all(F);
     free(F);
     return 0;

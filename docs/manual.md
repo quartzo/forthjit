@@ -1107,17 +1107,25 @@ arrays are gone:
 | Data space | reserved region (grow by page commit) | `CREATE` bodies, `,`/`ALLOT`, string literals |
 | Data stack | reserved region (grow by page commit) | data stack cells |
 | Return stack | reserved region (grow by page commit) | return stack cells |
+| Locals | reserved region (lazily committed) | `{ a b -- c }` frame slots |
+| `CATCH` frames | reserved region (lazily committed) | nested catch state |
+| Task deques | reserved region per worker (lazily committed) | work-stealing ring, no slot cap |
+| Channels | pool (arena + free list) | stable addresses, `CHAN-FREE`, live list |
+| Cycles / IR / JIT | one global `struct Ir` | compilation is serialized, not per task |
+
+Only the single process-wide compiler scratch (`struct Ir`) keeps the IR/JIT
+limits, and they are paid once rather than per task. A task context is now a
+few KB instead of ~1.5 MB (its private stacks, locals and catch frames are
+separate lazily-committed regions).
 
 Remaining bounded constants:
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `NAME_LEN` | 32 | bytes per name (31 chars + NUL) |
-| `MAX_LOCALS` | 16 | locals per definition |
-| `LOCALS_MAX` | 4096 | local-frame slots in total |
-| `MAX_XFRAME` | 64 | nested `CATCH` frames |
-| `IRBUF_SIZE` | 65536 | IR source buffer |
-| `MAX_IRTOK` | 8192 | IR tokens per body |
+| `MAX_LOCALS` | 16 | locals declared per definition |
+| `IRBUF_SIZE` | 65536 | IR source buffer (global) |
+| `MAX_IRTOK` | 8192 | IR tokens per body (global) |
 
 Memory is obtained with `MALLOC`/`REALLOC`/`FREE` (libc) and with `ALLOC`
 (a stable-address arena; `ARENA-RESET` releases it administratively without
