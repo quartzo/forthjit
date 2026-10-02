@@ -65,3 +65,10 @@ $FF . CR                      \ 255
 0x10 . CR                     \ 16
 
 CR
+
+\ ---- FORK / ;FORK namespace scope ----
+FORK
+  : ONLY-HERE 42 ;
+  ONLY-HERE . CR              \ 42
+;FORK
+S" ONLY-HERE" FIND . CR       \ 0  (gone after ;FORK)

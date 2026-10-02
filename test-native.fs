@@ -261,6 +261,19 @@ CODE rawdemo
 ;CODE
 rawdemo .S CR
 
+\ reclaim S2 (task context) as scratch by spilling it to a local slot
+CODE ctxtest
+  locals 8
+  mov [SP], S2
+  mov S2, #123
+  add S2, S2, #1
+  mov R0, S2
+  mov S2, [SP]
+  spush R0
+;CODE
+ctxtest . CR                 \ 124
+1 2 3 DEPTH . CR             \ 3  (context was preserved)
+
 CR
 
 \ comments inside CODE bodies

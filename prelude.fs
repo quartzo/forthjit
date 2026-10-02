@@ -500,10 +500,9 @@ label: zero
 CODE I
   require 0
   room 1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   cmp lt R1, #1, @bad
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, &rstack
   add R1, R1, #-1
   shl R1, R1, #3
@@ -521,10 +520,9 @@ label: bad
 CODE J
   require 0
   room 1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   cmp lt R1, #3, @bad
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, &rstack
   add R1, R1, #-3
   shl R1, R1, #3
@@ -646,33 +644,29 @@ CODE FIND
 
 CODE >R
   require 1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, &rstack
   shl R1, R1, #3
   add R2, R2, R1
   mov R1, [S1-1c]
   mov [R2], R1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #1
-  mov32 [R0], R1
+  mov32 &rp, R1
   add S1, S1, #-8
 ;CODE
 
 CODE R>
   room 1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, #1
   mov R0, R1
   mov R1, R2
   sig V W W
   icall &forth_need
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #-1
-  mov32 [R0], R1
+  mov32 &rp, R1
   mov R2, &rstack
   shl R1, R1, #3
   add R2, R2, R1
@@ -683,15 +677,13 @@ CODE R>
 
 CODE R@
   room 1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, #1
   mov R0, R1
   mov R1, R2
   sig V W W
   icall &forth_need
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #-1
   mov R2, &rstack
   shl R1, R1, #3
@@ -703,8 +695,7 @@ CODE R@
 
 CODE 2>R
   require 2
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   shl R1, R1, #3
   mov R2, &rstack
   add R2, R2, R1
@@ -712,26 +703,23 @@ CODE 2>R
   mov [R2], R1
   mov R1, [S1-1c]
   mov [R2+1c], R1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #2
-  mov32 [R0], R1
+  mov32 &rp, R1
   add S1, S1, #-16
 ;CODE
 
 CODE 2R>
   room 2
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, #2
   mov R0, R1
   mov R1, R2
   sig V W W
   icall &forth_need
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #-2
-  mov32 [R0], R1
+  mov32 &rp, R1
   shl R1, R1, #3
   mov R2, &rstack
   add R2, R2, R1
@@ -743,23 +731,20 @@ CODE 2R>
 ;CODE
 
 CODE EXIT
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   mov R2, #1
   mov R0, R1
   mov R1, R2
   sig V W W
   icall &forth_need
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #-1
-  mov32 [R0], R1
+  mov32 &rp, R1
   mov R2, &rstack
   shl R1, R1, #3
   add R2, R2, R1
   mov R1, [R2]
-  mov R2, &ip
-  mov [R2], R1
+  mov &ip, R1
 ;CODE
 
 CODE SP@
@@ -785,8 +770,7 @@ CODE SP!
 
 CODE RP@
   room 1
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #-1
   mov R2, &rstack
   shl R1, R1, #3
@@ -931,10 +915,9 @@ VARIABLE SCNT
 \ ---- loop control --------------------------------------------------------
 
 CODE UNLOOP
-  mov R0, &rp
-  mov.u32 R1, [R0]
+  mov.u32 R1, &rp
   add R1, R1, #-2
-  mov32 [R0], R1
+  mov32 &rp, R1
 ;CODE
 
 \ ---- tooling -------------------------------------------------------------
@@ -977,3 +960,127 @@ CODE NATIVE>
     THEN
     >LINK
   REPEAT DROP CR ;
+
+\ ---- tasks: TASK: name ... ;TASK -----------------------------------------
+\ Running `name` spawns a task that runs the body, leaving the task handle.
+CREATE TASK-NAME 64 ALLOT
+VARIABLE TASK-LEN
+
+: TASK:  ( "name" -- )
+  PARSE-NAME DUP TASK-LEN !  TASK-NAME SWAP MOVE
+  :NONAME ;
+IMMEDIATE
+
+: ;TASK  ( -- )
+  ['] ; EXECUTE
+  TASK-NAME TASK-LEN @ (TASK-WORD) ;
+IMMEDIATE
+
+\ ---- shared-state getters (CODE, over the &symbol operands) --------------
+CODE NWORDS
+  require 0
+  room 1
+  mov R0, &nwords
+  mov.u32 R0, [R0]
+  mov [S1], R0
+  add S1, S1, #8
+;CODE
+
+CODE MEMTOP
+  require 0
+  room 1
+  mov R0, &memtop
+  mov R0, [R0]
+  mov [S1], R0
+  add S1, S1, #8
+;CODE
+
+CODE N-WORKERS
+  require 0
+  room 1
+  mov R0, &nworkers
+  mov.u32 R0, [R0]
+  mov [S1], R0
+  add S1, S1, #8
+;CODE
+
+\ ---- FORK / ;FORK: lexical namespace scope -------------------------------
+CREATE FORK-STK 512 CELLS ALLOT
+VARIABLE FSP
+: FORK
+  LATEST  FORK-STK FSP @ CELLS + !
+  NWORDS  FORK-STK FSP @ CELLS + CELL-SIZE + !
+  MEMTOP  FORK-STK FSP @ CELLS + 2 CELLS + !
+  HERE    FORK-STK FSP @ CELLS + 3 CELLS + !
+  FSP @ 4 + FSP ! ;
+: ;FORK
+  FSP @ 4 - FSP !
+  FORK-STK FSP @ CELLS + @
+  FORK-STK FSP @ CELLS + CELL-SIZE + @
+  FORK-STK FSP @ CELLS + 2 CELLS + @
+  FORK-STK FSP @ CELLS + 3 CELLS + @
+  (ROLLBACK) ;
+
+\ ---- PAR: rayon-style fork/join of two unary XTs -------------------------
+: PAR  ( a1 xt1 a2 xt2 -- r1 r2 )
+  >R >R  1 SPAWN
+  R> R>  1 SPAWN
+  >R JOIN R> JOIN ;
+
+\ ---- atomics (CODE over the SLJIT atomic operations) ---------------------
+CODE A@ ( addr -- x )
+  require 1
+  mov R0, [S1-1c]
+label: retry
+  atomic.load SLJIT_MOV R1 R0
+  mov R2, R1
+  atomic.store SLJIT_MOV R2 R0 R1
+  jump SLJIT_ATOMIC_NOT_STORED retry
+  mov [S1-1c], R1
+;CODE
+
+CODE A! ( x addr -- )
+  require 2
+  mov R0, [S1-1c]
+  mov R2, [S1-2c]
+label: retry
+  atomic.load SLJIT_MOV R1 R0
+  atomic.store SLJIT_MOV R2 R0 R1
+  jump SLJIT_ATOMIC_NOT_STORED retry
+  add S1, S1, #-16
+;CODE
+
+CODE @+! ( n addr -- )
+  require 2
+  mov R0, [S1-1c]
+  mov R1, [S1-2c]
+label: retry
+  atomic.load SLJIT_MOV R2 R0
+  add R3, R2, R1
+  atomic.store SLJIT_MOV R3 R0 R2
+  jump SLJIT_ATOMIC_NOT_STORED retry
+  add S1, S1, #-16
+;CODE
+
+CODE CAS ( old new addr -- prev )
+  require 3
+  mov R0, [S1-1c]
+  mov R1, [S1-3c]
+  mov S0, [S1-2c]
+label: retry
+  atomic.load SLJIT_MOV R2 R0
+  mov R3, R2
+  cmp eq R2, R1, @eq
+  jmp @store
+label: eq
+  mov R3, S0
+label: store
+  atomic.store SLJIT_MOV R3 R0 R2
+  jump SLJIT_ATOMIC_NOT_STORED retry
+  mov R3, R2
+  cmp eq R2, R1, @done
+  mov R3, R1
+label: done
+  mov [S1-3c], R3
+  add S1, S1, #-16
+;CODE

@@ -1103,7 +1103,7 @@ arrays are gone:
 | Structure | Storage | Meaning |
 |-----------|---------|---------|
 | Dictionary | arena (malloc'd blocks) | `Word` nodes linked from `LATEST` |
-| Code space | growable buffer (`realloc`) | threaded `code[]` cells |
+| Code space | reserved region (stable base, grow by page commit) | threaded `code[]` cells |
 | Data space | reserved region (grow by page commit) | `CREATE` bodies, `,`/`ALLOT`, string literals |
 | Data stack | reserved region (grow by page commit) | data stack cells |
 | Return stack | reserved region (grow by page commit) | return stack cells |
@@ -1131,3 +1131,54 @@ returning pages to the OS). `,`/`ALLOT` bump the data region.
 - Dictionary lookup is case-sensitive.
 - `FORGET`/`MARKER` drop dictionary nodes; the arena memory is reclaimed
   administratively (not returned to the OS).
+
+---
+
+## 31. Tasks and parallelism
+
+The core boots a pool of work-stealing worker threads (`FORTH_WORKERS` or
+`nproc`, capped at 64). Each worker owns a deque: it pushes/pops its own jobs
+at the tail (LIFO) and steals from the head (FIFO) of other workers. A job is
+an execution token run to completion on a **task context**: a private set of
+data/return stacks that shares the compiled code region, the flat data space
+and the dictionary with the root.
+
+| Word | Stack effect | Meaning |
+|------|--------------|---------|
+| `SPAWN` | `( i*x xt n -- task )` | run `xt` with `n` copied args; returns a handle |
+| `JOIN` | `( task -- i*x )` | wait and push the result stack (re-raises on error) |
+| `PAR` | `( a1 xt1 a2 xt2 -- r1 r2 )` | fork/join of two unary XTs |
+| `TASK:` / `;TASK` | | define a word that, when run, spawns its body |
+| `N-WORKERS` | `( -- n )` | pool size |
+
+Communication uses the shared data space plus atomics and channels:
+
+| Word | Stack effect | Meaning |
+|------|--------------|---------|
+| `A@` / `A!` | `( addr -- x )` / `( x addr -- )` | atomic seq-cst load / store |
+| `@+!` | `( n addr -- )` | atomic fetch-and-add |
+| `CAS` | `( old new addr -- prev )` | atomic compare-and-swap |
+| `CHAN` | `( n -- ch )` | channel, buffer `n` (`0` = rendezvous) |
+| `>CHAN` / `CHAN>` | `( x ch -- )` / `( ch -- x )` | send / receive (blocking) |
+| `CHAN-CLOSE` | `( ch -- )` | close; further receives return `0` |
+
+A channel carries one cell. Send blocks only when full, receive only when
+empty (always, for a rendezvous). Because a blocked send/receive parks the
+worker thread, cross-task communication needs spare workers or enough buffer.
+
+`FORK ... ;FORK` opens a lexical namespace scope: words and data defined
+between the pair are forgotten when `;FORK` runs. Dictionary, data-space and
+heap mutation is serialized by an internal lock, so `:`, `CREATE`, `,`, `ALLOT`,
+`ALLOC` and `S"` (compile state) are safe to call from any task.
+
+Example:
+
+```
+: FIB ( n -- m )
+  DUP 2 < IF EXIT THEN
+  DUP 1- ['] FIB 1 SPAWN
+  OVER 2 - ['] FIB 1 SPAWN
+  >R JOIN R> JOIN
+  >R SWAP DROP R> + ;
+20 FIB . CR
+```

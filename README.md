@@ -507,15 +507,43 @@ CODE sq
 
 ### Calling convention
 
-`CODE` injects a prologue and epilogue:
+`CODE` injects a prologue and epilogue. Native words take two arguments in the
+C ABI registers (`R0`, `R1`), matching `cell *(fn)(cell *sp, struct forth *ctx)`:
 
-- argument `S0` is a pointer just past the top of the data stack;
-- the prologue copies it to `S1`, the working stack pointer;
+- `R0` is a pointer just past the top of the data stack; the prologue copies
+  it to `S1`, the working stack pointer;
+- `R1` is the task context; the prologue keeps it in `S2`;
 - `TOS = [S1-1c]`; pushing writes `[S1]` and does `S1 += 8`;
 - the epilogue returns the new `S1` in `R0` (`ret S1`).
 
-`R0..R3` and `S0..S1` are available. `locals N` as the first line (before any
-instruction) reserves `N` bytes of local stack, addressed as `[SP+off]`.
+`R0..R3` and `S0` are available as scratch. **`S1` (stack pointer) and `S2`
+(task context) are reserved** — never write them in hand-written IR; `&sp`,
+`&rp`, `&ip`, `&dstack` and friends already resolve relative to `S2`. `locals N`
+as the first line (before any instruction) reserves `N` bytes of local stack,
+addressed as `[SP+off]`.
+
+`S2` is a SLJIT saved register, so it is preserved automatically across calls.
+A register-intensive `CODE` word may additionally reclaim it as scratch by
+spilling it to a **local** slot and reloading it afterwards — this is portable
+and uses only `mov`:
+
+```
+CODE CTXTEST
+  locals 8               \ one cell of local stack, addressed as [SP+off]
+  mov [SP], S2           \ spill the context
+  mov S2, #123           \ use S2 as an extra scratch register
+  add S2, S2, #1
+  mov R0, S2
+  mov S2, [SP]           \ restore the context
+  spush R0
+;CODE
+```
+
+While `S2` is clobbered, do not use anything that resolves through the context
+(`&sp`, `&rp`, `require`, `room`, or a call, which forwards the context in
+`R1`); restore it first. `locals N` is the general way to free a register by
+spilling its value to the frame. On x86-64 you can also use the raw
+`asm.push S2` / `asm.pop S2`, but that is not portable.
 
 ### Operands
 
@@ -868,6 +896,84 @@ CREATE CC1 12 , 8 , 1 , 222 , 13 , 1 , 111 , 9 , 9 , 0 ,
 CC1 VM-BIND VM-RUN CR     \ 222  (111 is skipped by the continuation)
 ```
 
+## Tasks: work-stealing parallelism
+
+The core ships a small, shared-memory task runtime with a work-stealing
+scheduler in the spirit of Go's GMP and Rust's rayon. At boot a pool of
+workers is started (`FORTH_WORKERS` or `nproc`), each owning a deque. A worker
+pushes/pops its own jobs at the tail (LIFO) and steals from the head (FIFO) of
+other workers' deques.
+
+A job is an execution token run to completion on a **task context**: a private
+`struct forth` with its own data/return stacks that shares the compiled code
+region, the flat data space and the dictionary with the root. Because
+generated code addresses the per-task fields through a context register
+(`S2`), the same native/JIT code runs unchanged on any task.
+
+```
+: FIB ( n -- m )
+  DUP 2 < IF EXIT THEN
+  DUP 1- ['] FIB 1 SPAWN
+  OVER 2 - ['] FIB 1 SPAWN
+  >R JOIN R> JOIN
+  >R SWAP DROP R> + ;
+
+10 FIB .    \ 55
+```
+
+Words:
+
+| Word | Stack effect | Meaning |
+|------|--------------|---------|
+| `SPAWN` | `( i*x xt n -- task )` | Run `xt` with `n` arguments copied from the stack on a worker. Returns a handle. |
+| `JOIN`  | `( task -- i*x )` | Wait for the task and push its result stack (a task that threw re-raises here). |
+| `N-WORKERS` | `( -- n )` | Number of pool workers. |
+| `PAR` | `( a1 xt1 a2 xt2 -- r1 r2 )` | rayon-style fork/join of two unary XTs. |
+| `A@` / `A!` | `( addr -- x )` / `( x addr -- )` | Atomic (seq-cst) load / store. |
+| `@+!` | `( n addr -- )` | Atomic fetch-and-add. |
+| `CAS` | `( old new addr -- prev )` | Atomic compare-and-swap; stores `new` if `*addr == old`, returns the previous value. |
+| `CHAN` | `( n -- ch )` | Create a channel with buffer `n` (`0` = rendezvous). |
+| `>CHAN` / `CHAN>` | `( x ch -- )` / `( ch -- x )` | Send / receive (blocking). |
+| `CHAN-CLOSE` | `( ch -- )` | Close; further receives return `0`. |
+| `TASK:` / `;TASK` | | Like `:` but running the name spawns the body and leaves a handle. |
+| `FORK` / `;FORK` | | Lexical namespace scope: words defined in between are forgotten at `;FORK`. |
+
+`PAR`, `TASK:`/`;TASK` and `FORK`/`;FORK` are plain Forth in the prelude. The
+getters `NWORDS`, `MEMTOP` and `N-WORKERS` are `CODE` words over the `&nwords`
+/ `&memtop` / `&nworkers` symbols, and `A@`/`A!`/`@+!`/`CAS` are `CODE` words
+over the SLJIT atomic operations (`atomic.load`/`atomic.store` bind to
+`sljit_emit_atomic_load`/`store`; the read-modify-write ones retry on the
+`ATOMIC_STORED` flag). The C side keeps only the thread pool (`SPAWN`/`JOIN`),
+`(TASK-WORD)`, `(ROLLBACK)` and the channels.
+
+Atoms operate on the flat data space (e.g. a `VARIABLE`), so tasks can build
+locks and counters: `0 CNT A! ... 1 CNT @+! ... BEGIN 0 1 LK CAS 0= UNTIL`.
+Channels carry one `cell` each (an integer, an address, an XT, a float); for a
+larger object, send its address. A channel send blocks only when the buffer is
+full and a receive only when it is empty (always, for a `0`-buffer rendezvous).
+`CHAN-TEST` in `test-threads.fs` runs a producer/consumer sum over a buffered
+channel and over a rendezvous channel.
+
+Shared mutation is serialized by an internal lock: the dictionary (`:`,
+`CREATE`, `MARKER`, `FORGET`, `FORK`), the data space (`,`, `ALLOT`, `S"` at
+compile time) and the heap (`ALLOC`, `ARENA-RESET`) can be used from any task
+without corrupting them. While a worker waits in `JOIN` it keeps draining the
+queue, so recursively forked/joined computations cannot deadlock a fully parked
+pool. `bench-par.fs` is a divide-and-conquer sum that scales nearly linearly
+with the worker count.
+
+Limitations (the current step is deliberately minimal):
+
+- Channel send/receive block the worker thread (real condvar), so cross-task
+  communication needs spare workers: use the default pool (`nproc`, `>= 2`) or
+  size buffers to avoid blocking. Only `JOIN` parks cooperatively.
+- Blocking C calls (file I/O) block the worker too.
+- `FORK` scopes the shared dictionary for the current context; it is a lexical
+  tool, not a per-task isolated dictionary.
+
+Build targets: `make test` (includes `test-threads.fs`), `make asan`,
+`make tsan` (clean).
+
 ## Minimal Scheme (`lib/scheme.fs`)
 
 A tree-walking Scheme interpreter is included as a library, validating that
@@ -1053,11 +1159,26 @@ Legend: **Yes** = implemented, **Partial** = limited/subset, **No** = absent.
 | Runtime patching (`rwjump`/`rwconst`, `SET-*`) | Yes | self-modifying code / inline caches |
 | `inline` macro expansion                | Yes     | label renaming per expansion |
 | JIT of colon definitions (`JIT`/`JIT-ALL`) | Yes  | call-threaded; no loops/inlining yet |
-| SIMD / atomics                          | No      | SLJIT supports them; not bound here |
+| SIMD / atomics                          | Partial | atomics bound via `atomic.load`/`atomic.store`; Forth `A@`/`A!`/`@+!`/`CAS`; no SIMD |
 | Variadic C calls (e.g. `printf`)        | Yes     | via `asm.*`: place args in ABI regs, `asm.mov.al`, `asm.call` |
 | Raw per-arch emission (`asm.*`, `db`..`dq`) | Yes  | x86-64; `ARCH` selects the target |
 | Direct `sljit_emit_call` to a label     | No      | requires a separately compiled function context |
 | Meta-JIT (`&sljit_*` from native code)  | No      | would need `-rdynamic` / explicit export |
+
+### Concurrency
+
+| Capability                              | Status  | Notes |
+|-----------------------------------------|---------|-------|
+| Work-stealing worker pool               | Yes     | per-worker deque, LIFO pop / FIFO steal, `FORTH_WORKERS` |
+| Tasks with private stacks               | Yes     | shared code region, data space and dictionary |
+| `SPAWN` / `JOIN` / `TASK:`              | Yes     | `JOIN` parks cooperatively (help while waiting) |
+| `PAR` (rayon-style join)                | Yes     | fork/join of two unary XTs |
+| Atomics (`A@`/`A!`/`@+!`/`CAS`)         | Yes     | seq-cst, over the flat data space |
+| Channels (`CHAN`/`>CHAN`/`CHAN>`/`CHAN-CLOSE`) | Yes | buffered + rendezvous; blocks the worker |
+| Namespace scopes (`FORK`/`;FORK`)       | Yes     | lexical snapshot of the shared dictionary |
+| Shared allocator synchronization        | Yes     | dictionary / data / heap mutation is locked |
+| Resumable parking (blocked task yields worker) | No | channels block the worker; needs a continuation runtime |
+| Prioritized / timed scheduling          | No      | FIFO/LIFO stealing only |
 
 ## License
 
