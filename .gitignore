@@ -7,3 +7,4 @@
 # core dumps
 core
 core.*
+vgcore.*

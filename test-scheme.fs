@@ -17,3 +17,15 @@ S" (quote (1 2 . 3))" SCHEME-EVAL       \ (1 2 . 3)
 S" (eq? (quote a) (quote a))" SCHEME-EVAL    \ #t
 S" (define (add a b) (+ a b))" SCHEME-EVAL
 S" (add 20 22)" SCHEME-EVAL             \ 42
+
+\ vectors (a tagged store array)
+S" (define v (make-vector 3))" SCHEME-EVAL
+S" (vector-set! v 0 10)" SCHEME-EVAL
+S" (vector-set! v 1 20)" SCHEME-EVAL
+S" (vector-ref v 0)" SCHEME-EVAL        \ 10
+S" (vector-ref v 2)" SCHEME-EVAL        \ 0
+S" (vector-length v)" SCHEME-EVAL       \ 3
+S" (vector? v)" SCHEME-EVAL             \ #t
+S" v" SCHEME-EVAL                       \ #(10 20 0)
+
+SYSTEM STORE-FREE

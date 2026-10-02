@@ -34,8 +34,10 @@ $(SLJIT_OBJ): $(SLJIT_DIR)/sljitLir.c
 $(TINF_OBJ): $(TINF_DIR)/tinflate.c $(TINF_DIR)/tinf.h
 	$(CC) -Os -DNDEBUG -w -I$(TINF_DIR) -c $< -o $@
 
+# forth.c and code.c inline sljit accessors that read struct sljit_compiler
+# fields, so they must see the same SLJIT_* configuration as sljitLir.o.
 $(TARGET): forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) $(CFLAGS) $(SHRINK) $(CPPFLAGS) $(LDFLAGS) -o $@ forth.c code.c \
+	$(CC) $(CFLAGS) $(SHRINK) $(SLJIT_DEFS) $(CPPFLAGS) $(LDFLAGS) -o $@ forth.c code.c \
 	      $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread -Wl,-s
 
 test: $(TARGET)
@@ -43,17 +45,30 @@ test: $(TARGET)
 	./$(TARGET) test-native.fs </dev/null
 	./$(TARGET) test-lib.fs </dev/null
 	./$(TARGET) test-scheme.fs </dev/null
+	./$(TARGET) test-scheme-gc.fs </dev/null
 	./$(TARGET) test-objects.fs </dev/null
+	./$(TARGET) test-scheme-jit.fs </dev/null
+	./$(TARGET) test-code-obj.fs </dev/null
+	./$(TARGET) test-arena.fs </dev/null
+	./$(TARGET) test-array.fs </dev/null
+	./$(TARGET) test-gc-stress.fs </dev/null
+	./$(TARGET) test-hashtable.fs </dev/null
+	./$(TARGET) test-store-chain.fs </dev/null
+	./$(TARGET) test-task-store.fs </dev/null
 	FORTH_WORKERS=4 ./$(TARGET) test-threads.fs </dev/null
 	@printf '(+ 1 2)\n' | ./$(TARGET) --require scheme.fs --repl SCHEME >/dev/null
 
 asan: forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined $(SLJIT_DEFS) -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
 
 tsan: forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=thread -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=thread $(SLJIT_DEFS) -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
+
+# Free-list poisoning build for Valgrind: run under `valgrind ./forth FILE`.
+vg: forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -DUSE_VALGRIND $(SLJIT_DEFS) -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
 
 clean:
 	rm -f $(TARGET) $(SLJIT_OBJ) $(TINF_OBJ) $(MKPRELUDE) $(PRELUDE_HDR)
 
-.PHONY: all test asan tsan clean
+.PHONY: all test asan tsan vg clean

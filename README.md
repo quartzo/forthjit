@@ -104,6 +104,7 @@ process.
 | `prelude.fs` | native prelude: stack, arithmetic, strings, memory, compiler kit, control flow |
 | `lib/vm.fs` | generic bytecode VM: explicit state, `EXECUTE` dispatch, `call/cc`, coroutines |
 | `lib/objects.fs` | dynamic object store with a mark-and-sweep GC (malloc'd, non-moving) |
+| `lib/scheme-jit.fs` | JIT proof: compiles a small Scheme expression to native code via the IR |
 | `lib/scheme.fs` | minimal Scheme on the runtime, with a `SCHEME` REPL |
 | `bin/scheme` | launcher for the Scheme REPL |
 | `tools/mkprelude.c` | build tool: compresses `prelude.fs` into `prelude_blob.h` |
@@ -1006,6 +1007,24 @@ BUILD   GC
 - Roots are the data stack, the locals frame, the return stack
   (`DSTACK`/`LOCALS`/`RSTACK` kernel accessors) and slots registered with
   `ROOT`. `GC` marks then sweeps; `OBJECTS-FREE` releases the heap.
+
+## JIT-ing Scheme (`lib/scheme-jit.fs`)
+
+A first proof that the base can compile a hosted language to native code:
+`lib/scheme-jit.fs` reads a small Scheme expression (one fixnum parameter `x`,
+fixnum literals and `+ - *` with nesting), emits IR into a buffer and turns it
+into a native word with `ASSEMBLE-FORTH` (the Forth register ABI), then calls
+it with `CALLF1`. The compiled-function record lives in the object store.
+
+```
+REQUIRE scheme-jit.fs
+: RUN1 ( x c-addr u -- tagged ) PARSE1 JIT-RUN1 ;
+5 >FIX S" (+ (* x 2) 3)" RUN1 FIX> . CR   \ 13
+```
+
+This validates the whole native pipeline (AST → IR → `sljit` → call) that the
+typed-Scheme/TypeScript compiler will reuse. Not yet covered: environments,
+closures, `if`/`let`, lists, and tail calls.
 
 ## Minimal Scheme (`lib/scheme.fs`)
 

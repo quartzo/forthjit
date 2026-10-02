@@ -102,15 +102,15 @@ typedef struct { char name[32]; sljit_uw addr; sljit_s32 op; } PatchConst;
 #define MAX_IRLAB  256
 #define MAX_IRJMP  512
 
-/* ---- generated code registry ----------------------------------------- */
-#define MAX_JIT 1024
+/* ---- generated code registry (growable) ------------------------------ */
 
 /* ---- compile/JIT state (single instance: compilation is serialized by the
    shared-memory lock; only the root context ever compiles) --------------- */
 struct Ir {
-    /* generated code registry */
-    void *jit_codes[MAX_JIT];
+    /* generated code registry (process-lifetime code: boot/session words) */
+    void **jit_codes;
     int   njit;
+    int   jit_cap;
 
     /* SLJIT assembler + IR token stream */
     struct sljit_compiler *jcomp;
@@ -193,6 +193,9 @@ struct forth {
     /* shared state root: tasks point at the root context */
     struct forth *root;
 
+    /* this context's object store handle (0 until one is attached) */
+    cell store;
+
     /* stacks: pointers into reserved regions (stable base, grow by commit) */
     Region dstack_r;
     cell  *dstack;
@@ -271,7 +274,9 @@ void  dyn_close(struct forth *F, void *handle);
 /* the CODE parser, defined in code.c and used by forth.c */
 void  ir_put(struct forth *F, const char *tok);
 void  ir_put_text(struct forth *F, const char *s, int len);
-void *ir_compile(struct forth *F, int abi, int local);
+void *ir_compile(struct forth *F, int abi, int local, int keep);
+/* register a generated code pointer as process-lifetime (freed at shutdown) */
+void  ir_track_code(void *code);
 extern const NameVal sljit_consts[];
 
 /* context register and pool size, shared with the CODE parser */

@@ -16,6 +16,15 @@
 #include "tinf.h"
 #include "prelude_blob.h"
 
+#ifdef USE_VALGRIND
+#include <valgrind/memcheck.h>
+static void vg_noaccess(void *a, size_t n) { if (a && n) VALGRIND_MAKE_MEM_NOACCESS(a, n); }
+static void vg_access(void *a, size_t n)   { if (a && n) VALGRIND_MAKE_MEM_DEFINED(a, n); }
+#else
+static void vg_noaccess(void *a, size_t n) { (void)a; (void)n; }
+static void vg_access(void *a, size_t n)   { (void)a; (void)n; }
+#endif
+
 /* saved register holding the current task context (`struct forth *`) so that
    generated code accesses per-task fields relative to it and stays shareable */
 #define CTX_REG SLJIT_S2
@@ -63,6 +72,15 @@ static void mem_mutex_init(void) {
     pthread_mutex_init(&g_mem_mu, &a);
     pthread_mutexattr_destroy(&a);
 }
+
+/* serializes mutation of the shared object-store child registry, so tasks
+   spawned concurrently can attach/detach their stores safely */
+static pthread_mutex_t g_store_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* optional Forth hooks run around each task body (set via (TASK-HOOKS)) so a
+   task can create and release its own object store */
+static void *g_task_enter_xt;
+static void *g_task_leave_xt;
 
 /* reserve `cells` cells of shared data space; returns the starting offset */
 static cell data_reserve(struct forth *F, cell cells) {
@@ -559,12 +577,199 @@ static void p_arena_reset(struct forth *F) {
     mem_unlock();
 }
 
+/* ---- anonymous mappings backing Forth-level arenas ------------------- */
+/* Forth owns the allocation policy; C only hands out zero-filled pages and
+   takes them back.  RW for data, RWX for executable code.  MAP_NORESERVE so
+   an idle mapping costs no swap; pages are committed on first touch. */
+static void *map_anon(size_t n, int prot) {
+    if (!n) n = 1;
+    void *p = mmap(NULL, n, prot,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+}
+static void p_map_rw(struct forth *F) {
+    void *p = map_anon((size_t)pop(F), PROT_READ | PROT_WRITE);
+    if (!p) throw_error(F, "MAP-RW: cannot map");
+    push(F, (cell)(intptr_t)p);
+}
+static void p_map_rwx(struct forth *F) {
+    void *p = map_anon((size_t)pop(F), PROT_READ | PROT_WRITE | PROT_EXEC);
+    if (!p) throw_error(F, "MAP-RWX: cannot map");
+    push(F, (cell)(intptr_t)p);
+}
+static void p_unmap(struct forth *F) {
+    size_t n = (size_t)pop(F);
+    void  *p = (void *)(intptr_t)pop(F);
+    if (p && n) munmap(p, n);
+}
+
+/* ---- object allocation fast path (lib/objects.fs S-NEW) -------------- */
+/* Does bump/first-fit allocation from the store's data arena, object header
+   setup, list link and hash-table insert, all in C.  Returns 0 when a slow
+   path is needed (GC, index growth, or block growth), so S-NEW can fall back
+   to the Forth implementation.  The offsets mirror lib/objects.fs and
+   lib/arena.fs; keep them in sync. */
+enum { O_S_OBJS = 0, O_S_USED = 1, O_S_LIMIT = 2, O_S_TAB = 4, O_S_TABCAP = 5,
+       O_S_TABN = 6, O_S_TABTOMB = 7, O_S_DATA = 11 };
+enum { O_A_CUR = 2, O_A_FREE = 3 };
+enum { O_B_CAP = 1, O_B_USED = 2 };
+enum { O_H_NEXT = 0, O_H_TYPE = 1, O_H_SIZE = 2, O_H_MARK = 3, O_H_PAYLOAD = 4 };
+enum { O_T_SIZE = 0 };
+#define O_C_HDR_CELLS 1        /* chunk header (size); the free-list link shares obj[0] */
+#define O_B_HDR_CELLS 3
+
+static void vg_guard(void *a, size_t n, const char *who) {
+    if (n > (1u << 20)) { fprintf(stderr, "\nVG %s huge a=%p n=%zu\n", who, a, n); fflush(stderr); abort(); }
+}
+/* (VG-OPEN-HDR) ( chunk -- sz ): unpoison the 2 free-list header cells. */
+static void p_vg_open_hdr(struct forth *F) {
+    cell *c = (cell *)(intptr_t)pop(F);
+    vg_access(c, 2 * sizeof(cell));
+    push(F, c[0]);
+}
+/* (VG-CLOSE-HDR) ( chunk -- ): re-poison the 2 header cells. */
+static void p_vg_close_hdr(struct forth *F) {
+    cell *c = (cell *)(intptr_t)pop(F);
+    vg_noaccess(c, 2 * sizeof(cell));
+}
+/* (VG-OPEN-ALL) ( chunk sz -- ) / (VG-CLOSE-ALL) ( chunk sz -- ) */
+static void p_vg_open_all(struct forth *F) {
+    size_t n = (size_t)pop(F); void *a = (void *)(intptr_t)pop(F);
+    vg_guard(a, n, "OPEN-ALL"); vg_access(a, n);
+}
+static void p_vg_close_all(struct forth *F) {
+    size_t n = (size_t)pop(F); void *a = (void *)(intptr_t)pop(F);
+    vg_guard(a, n, "CLOSE-ALL"); vg_noaccess(a, n);
+}
+
+static uint64_t obj_hash(uint64_t x, uint64_t cap) {
+    x >>= 3;
+    x *= 2654435761u;
+    x ^= x >> 32;
+    x ^= x >> 16;
+    return x & (cap - 1);
+}
+
+static void p_obj_fast(struct forth *F) {
+    cell *store  = (cell *)(intptr_t)pop(F);
+    cell  ncells = pop(F);
+    cell *type   = (cell *)(intptr_t)pop(F);
+    if (!store || !type || ncells < 0) { push(F, 0); return; }
+    cell tsize = ncells;
+    cell payload = (tsize + O_H_PAYLOAD) * (cell)sizeof(cell);
+    size_t n = ((size_t)payload + O_C_HDR_CELLS * sizeof(cell) + 7u) & ~(size_t)7u;
+    if (store[O_S_USED] > store[O_S_LIMIT]) { push(F, 0); return; }
+    if ((store[O_S_TABN] + store[O_S_TABTOMB]) * 4 >= store[O_S_TABCAP] * 3) { push(F, 0); return; }
+    cell *arena = (cell *)(intptr_t)store[O_S_DATA];
+    if (!arena) { push(F, 0); return; }
+    cell *obj = NULL;
+    cell *prev = NULL;
+    cell *c = (cell *)(intptr_t)arena[O_A_FREE];
+    while (c) {
+        vg_access(c, 2 * sizeof(cell));          /* open header to read size/link */
+        cell sz = c[0];
+        cell *next = (cell *)(intptr_t)c[1];
+        if (sz >= (cell)n) {
+            vg_access(c, (size_t)sz);            /* whole chunk becomes live */
+            if (sz - (cell)n >= (cell)((O_C_HDR_CELLS + 1) * sizeof(cell))) {
+                cell *rest = (cell *)((char *)c + n);
+                rest[0] = sz - (cell)n;
+                rest[1] = (cell)(intptr_t)next;
+                if (prev) { vg_access(&prev[1], sizeof(cell)); prev[1] = (cell)(intptr_t)rest; vg_noaccess(&prev[1], sizeof(cell)); }
+                else arena[O_A_FREE] = (cell)(intptr_t)rest;
+                c[0] = (cell)n;             /* allocated chunk is exactly n bytes */
+                vg_guard(rest, (size_t)(sz - (cell)n), "CLOSE-ALL");
+                vg_noaccess(rest, (size_t)(sz - (cell)n));  /* remainder is free: full poison */
+            } else {
+                if (prev) { vg_access(&prev[1], sizeof(cell)); prev[1] = (cell)(intptr_t)next; vg_noaccess(&prev[1], sizeof(cell)); }
+                else arena[O_A_FREE] = (cell)(intptr_t)next;
+            }
+            obj = (cell *)((char *)c + O_C_HDR_CELLS * sizeof(cell));
+            break;
+        }
+        vg_noaccess(c, 2 * sizeof(cell));        /* re-poison untouched header */
+        prev = c;
+        c = next;
+    }
+    if (!obj) {
+        cell *blk = (cell *)(intptr_t)arena[O_A_CUR];
+        if (!blk) { push(F, 0); return; }
+        size_t used = (size_t)blk[O_B_USED];
+        size_t cap  = (size_t)blk[O_B_CAP];
+        if (used + n > cap - O_B_HDR_CELLS * sizeof(cell)) { push(F, 0); return; }
+        char *chunk = (char *)blk + O_B_HDR_CELLS * sizeof(cell) + used;
+        ((cell *)chunk)[0] = (cell)n;            /* catches a bump overlapping a free chunk */
+        blk[O_B_USED] = (cell)(used + n);
+        obj = (cell *)(chunk + O_C_HDR_CELLS * sizeof(cell));
+    }
+    obj[O_H_NEXT] = store[O_S_OBJS];
+    store[O_S_OBJS] = (cell)(intptr_t)obj;
+    obj[O_H_TYPE] = (cell)(intptr_t)type;
+    obj[O_H_SIZE] = tsize;
+    obj[O_H_MARK] = 0;
+    store[O_S_USED] += payload;
+    cell cap = store[O_S_TABCAP];
+    cell *tab = (cell *)(intptr_t)store[O_S_TAB];
+    cell i = (cell)obj_hash((uint64_t)(uintptr_t)obj, (uint64_t)cap);
+#ifdef USE_VALGRIND
+    if (VALGRIND_CHECK_MEM_IS_ADDRESSABLE(&tab[i], sizeof(cell)) ||
+        VALGRIND_CHECK_MEM_IS_ADDRESSABLE(&tab[cap - 1], sizeof(cell))) {
+        fprintf(stderr, "\nTAB-POISONED store=%p tab=%p i=%ld cap=%ld data=%p meta=%p obj=%p\n",
+                (void*)store, (void*)tab, (long)i, (long)cap,
+                (void*)(intptr_t)store[O_S_DATA], (void*)(intptr_t)store[13], (void*)obj);
+        fflush(stderr); abort();
+    }
+#endif
+    while (tab[i] > 1) i = (i + 1) & (cap - 1);
+    tab[i] = (cell)(intptr_t)obj;
+    store[O_S_TABN] += 1;
+    push(F, (cell)(intptr_t)obj);
+}
+
+/* (TAB-REHASH) ( oldtab oldcap newtab newcap -- ): reinsert live entries. */
+static void p_tab_rehash(struct forth *F) {
+    cell newcap = pop(F);
+    cell *newtab = (cell *)(intptr_t)pop(F);
+    cell oldcap = pop(F);
+    cell *oldtab = (cell *)(intptr_t)pop(F);
+    if (!oldtab || !newtab || newcap < 1) return;
+    for (cell k = 0; k < oldcap; k++) {
+        cell v = oldtab[k];
+        if (v > 1) {
+            uint64_t h = obj_hash((uint64_t)v, (uint64_t)newcap);
+            while (newtab[h] > 1) h = (h + 1) & (uint64_t)(newcap - 1);
+            newtab[h] = v;
+        }
+    }
+}
+
 /* GC root accessors: the live locals frame and the return-stack depth, so a
    collector written in Forth can scan every place that can hold a reference. */
 static void p_locals_range(struct forth *F) { int n = F->lfree; push(F, (cell)(intptr_t)F->locals); push(F, n); }
 static void p_dstack_range(struct forth *F) { int n = F->sp; push(F, (cell)(intptr_t)F->dstack); push(F, n); }
 static void p_rstack_range(struct forth *F) { int n = F->rp; push(F, (cell)(intptr_t)F->rstack); push(F, n); }
 static void p_rdepth(struct forth *F) { push(F, F->rp); }
+
+/* ---- object-store plumbing (see lib/objects.fs) ----------------------- */
+static void p_get_store(struct forth *F) { push(F, F->store); }
+static void p_set_store(struct forth *F) { F->store = pop(F); }
+static void p_store_lock(struct forth *F)   { (void)F; pthread_mutex_lock(&g_store_mu); }
+static void p_store_unlock(struct forth *F) { (void)F; pthread_mutex_unlock(&g_store_mu); }
+/* (TASK-HOOKS) ( enter leave -- ) : Forth words run around a task body */
+static void p_task_hooks(struct forth *F) {
+    void *leave = (void *)(intptr_t)pop(F);
+    void *enter = (void *)(intptr_t)pop(F);
+    g_task_enter_xt = enter;
+    g_task_leave_xt = leave;
+}
+
+/* WORD-NAME ( w -- c-addr u ) : name text of a dictionary word */
+static void p_word_name(struct forth *F) {
+    Word *w = (Word *)(intptr_t)pop(F);
+    if (!w) { push(F, 0); push(F, 0); return; }
+    push(F, (cell)(intptr_t)w->name);
+    push(F, (cell)strlen(w->name));
+}
 
 /* read one line from stdin: ( -- c-addr u ); u = 0 at EOF */
 static void p_read_line(struct forth *F) {
@@ -1100,7 +1305,7 @@ static void *jit_compile(struct forth *F, Word *w) {
     sljit_free_compiler(c);
     free(istarget); free(labels); free(jr);
     if (!jit) return NULL;
-    if (g_ir.njit < MAX_JIT) g_ir.jit_codes[g_ir.njit++] = jit;
+    ir_track_code(jit);
     return jit;
 }
 
@@ -1266,7 +1471,7 @@ static void p_code(struct forth *F) {
 static void p_endcode(struct forth *F) {
     if (F->state != 2) throw_error(F, ";CODE without CODE");
     char *body = strdup(g_ir.irbuf);         /* keep the IR source for INLINE */
-    void *code = ir_compile(F, 1, 0);
+    void *code = ir_compile(F, 1, 0, 1);
     if (F->compiling) {
         F->compiling->native = code;
         F->compiling->irbody = body;
@@ -1326,8 +1531,40 @@ static void p_assemble(struct forth *F) {
     memcpy(g_ir.irbuf, a, (size_t)len);
     g_ir.irbuf[len] = 0;
     g_ir.irlen = (int)len;
-    void *code = ir_compile(F, 0, 0);
+    void *code = ir_compile(F, 0, 0, 1);
     push(F, (cell)code);
+}
+
+/* like ASSEMBLE but with the Forth register ABI (auto prologue/epilogue),
+   so the generated word runs on the data stack: ( i*x -- j*y ) */
+static void p_assemble_forth(struct forth *F) {
+    cell len = pop(F);
+    char *a = (char *)pop(F);
+    if (len < 0 || len >= IRBUF_SIZE) throw_error(F, "bad IR length");
+    memcpy(g_ir.irbuf, a, (size_t)len);
+    g_ir.irbuf[len] = 0;
+    g_ir.irlen = (int)len;
+    void *code = ir_compile(F, 1, 0, 1);
+    push(F, (cell)code);
+}
+
+/* same, but the caller owns the code: it is not tracked and must be freed
+   with (SLJIT-FREE) after being copied into a store code arena */
+static void p_assemble_forth_dyn(struct forth *F) {
+    cell len = pop(F);
+    char *a = (char *)pop(F);
+    if (len < 0 || len >= IRBUF_SIZE) throw_error(F, "bad IR length");
+    memcpy(g_ir.irbuf, a, (size_t)len);
+    g_ir.irbuf[len] = 0;
+    g_ir.irlen = (int)len;
+    void *code = ir_compile(F, 1, 0, 0);
+    push(F, (cell)code);
+}
+
+/* (SLJIT-FREE) ( addr -- ) : release a code block returned by the *_DYN words */
+static void p_sljit_free(struct forth *F) {
+    void *code = (void *)(intptr_t)pop(F);
+    if (code) sljit_free_code(code, NULL);
 }
 
 static void p_tick(struct forth *F) {
@@ -1480,6 +1717,24 @@ static void p_native_def(struct forth *F) {
 
 /* address of libc putchar, for icall demos */
 static void p_c_putchar(struct forth *F) { push(F, (cell)(intptr_t)putchar); }
+
+/* CALL1 ( x ptr -- y ) : call generated code with the C ABI `cell fn(cell)` */
+static void p_call1(struct forth *F) {
+    void *fp = (void *)(intptr_t)pop(F);
+    cell x = pop(F);
+    push(F, ((cell (*)(cell))fp)(x));
+}
+
+/* CALLF1 ( x ptr -- y ) : call Forth-ABI code; arg x is on top of the data
+   stack, the generated word runs on it and leaves its result. */
+static void p_callf1(struct forth *F) {
+    void *fp = (void *)(intptr_t)pop(F);
+    typedef cell *(*Nat)(cell *, struct forth *);
+    cell *r = ((Nat)fp)(F->dstack + F->sp, F);
+    ptrdiff_t n = r - F->dstack;
+    if (n < 0 || (size_t)n > F->dstack_r.reserved / sizeof(cell)) throw_error(F, "native stack error");
+    F->sp = (int)n;
+}
 
 /* ---- string and byte-memory words ------------------------------------- */
 /* ---- dlopen / dlsym Forth surface ------------------------------------- */
@@ -1639,13 +1894,25 @@ static void task_run(Task *t) {
     t->err = 0;
     if (setjmp(T->abort_env) == 0) {
         T->abort_active = 1;
+        if (g_task_enter_xt) execute_word(T, (Word *)g_task_enter_xt);
         execute_word(T, t->xt);
         T->abort_active = 0;
     } else {
+        T->abort_active = 0;
         t->err = (int)T->err_code;
         if (t->err == 0) t->err = -1;
         strncpy(t->err_msg, T->err_msg, sizeof t->err_msg - 1);
         t->err_msg[sizeof t->err_msg - 1] = 0;
+    }
+    /* release the task's object store (if one was attached) before the
+       context goes away; the hook must not run with abort_active set on a
+       stale frame, so give it its own guard */
+    if (g_task_leave_xt && T->store) {
+        if (setjmp(T->abort_env) == 0) {
+            T->abort_active = 1;
+            execute_word(T, (Word *)g_task_leave_xt);
+        }
+        T->abort_active = 0;
     }
     atomic_store_explicit(&t->done, 1, memory_order_release);
 }
@@ -2009,6 +2276,7 @@ static void init_dict(struct forth *F) {
     define_prim(F, "JIT-ALL", p_jit_all);
     define_prim(F, "WORDS", p_words);
     define_prim(F, "SEE", p_see);
+    define_prim(F, "WORD-NAME", p_word_name);
     /* strings / byte memory live in the native prelude */
 
     /* heap */
@@ -2017,10 +2285,24 @@ static void init_dict(struct forth *F) {
     define_prim(F, "FREE", p_free);
     define_prim(F, "ALLOC", p_alloc);
     define_prim(F, "ARENA-RESET", p_arena_reset);
+    define_prim(F, "MAP-RW", p_map_rw);
+    define_prim(F, "MAP-RWX", p_map_rwx);
+    define_prim(F, "UNMAP", p_unmap);
     define_prim(F, "LOCALS", p_locals_range);
     define_prim(F, "DSTACK", p_dstack_range);
     define_prim(F, "RSTACK", p_rstack_range);
     define_prim(F, "RDEPTH", p_rdepth);
+    define_prim(F, "(OBJ-FAST-N)", p_obj_fast);
+    define_prim(F, "(TAB-REHASH)", p_tab_rehash);
+    define_prim(F, "(VG-OPEN-HDR)", p_vg_open_hdr);
+    define_prim(F, "(VG-CLOSE-HDR)", p_vg_close_hdr);
+    define_prim(F, "(VG-OPEN-ALL)", p_vg_open_all);
+    define_prim(F, "(VG-CLOSE-ALL)", p_vg_close_all);
+    define_prim(F, "(GET-STORE)", p_get_store);
+    define_prim(F, "(SET-STORE)", p_set_store);
+    define_prim(F, "STORE-LOCK", p_store_lock);
+    define_prim(F, "STORE-UNLOCK", p_store_unlock);
+    define_prim(F, "(TASK-HOOKS)", p_task_hooks);
     define_prim(F, "READ-LINE", p_read_line);
 
     /* floating point */
@@ -2079,8 +2361,13 @@ static void init_dict(struct forth *F) {
     def_imm(F, "IR\"", p_irquote);
     def_imm(F, "S\"", p_squote);
     define_prim(F, "ASSEMBLE", p_assemble);
+    define_prim(F, "ASSEMBLE-FORTH", p_assemble_forth);
+    define_prim(F, "ASSEMBLE-FORTH-DYN", p_assemble_forth_dyn);
+    define_prim(F, "(SLJIT-FREE)", p_sljit_free);
     define_prim(F, "NATIVE", p_native_def);
     define_prim(F, "C-PUTCHAR", p_c_putchar);
+    define_prim(F, "CALL1", p_call1);
+    define_prim(F, "CALLF1", p_callf1);
     define_prim(F, "'", p_tick);
     define_prim(F, "CODE-ADDR", p_code_addr);
     def_imm(F, "[']", p_bracket_tick);
@@ -2349,6 +2636,9 @@ int main(int argc, char **argv) {
     pool_stop();
     channels_free();
     for (int i = 0; i < g_ir.njit; i++) sljit_free_code(g_ir.jit_codes[i], NULL);
+    free(g_ir.jit_codes);
+    g_ir.jit_codes = NULL;
+    g_ir.njit = g_ir.jit_cap = 0;
     for (Word *w = F->latest; w; w = w->link) { free(w->irbody); free(w->src); }
     region_destroy(&F->code_r);
     arena_destroy(&F->heap);

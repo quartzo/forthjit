@@ -1,12 +1,23 @@
-\ lib/objects.fs - dynamic object store with mark-and-sweep GC.
+\ lib/objects.fs - instance object store with mark-and-sweep GC.
 \ Load with `REQUIRE objects.fs`.
 \
-\ Objects are malloc'd individually (stable, non-moving addresses) and linked
-\ into one list.  A type is a Forth-defined descriptor with positional
-\ callback slots and a field table; each field declares its `kind` (scalar or
-\ pointer), so marking is precise by default.  A type may instead supply a
-\ custom TRACE callback.  Roots are the data stack, the locals frame, the
-\ return stack, and any slot registered with ROOT.
+\ A store is an opaque handle to a record that owns all of the mutable GC
+\ state (object list, live-byte counter, roots, address index, mark worklist)
+\ and two arenas: one for objects (S-DATA) and one for the table/worklist
+\ (S-META).  Every runtime word takes the store explicitly, so several
+\ independent stores can coexist.  Object memory comes from the store's data
+\ arena; freeing returns the chunk to the arena free list.
+\
+\ A type is a global, process-lifetime descriptor (shared metadata): with
+\ NEWTYPE/FIELD/;TYPE you declare one, and its `kind` per field (scalar or
+\ pointer) drives precise marking by default.  A type may instead supply a
+\ custom TRACE `( obj store -- )`.
+\
+\ Roots are the data stack, the locals frame, the return stack, and any slot
+\ registered with ROOT.  The store record offsets are cell offsets, so every
+\ access adds CELLS to reach the byte address.
+
+REQUIRE arena.fs
 
 \ --------------------------------------------------------------------------
 \ field kinds
@@ -22,12 +33,14 @@
 
 \ type descriptor (cells)
 0 CONSTANT T-SIZE       \ payload cells (defaults to field count)
-1 CONSTANT T-TRACE      \ ( obj -- ) trace pointer fields, or 0
+1 CONSTANT T-TRACE      \ ( obj store -- ) trace pointer fields, or 0
 2 CONSTANT T-PRINT      \ ( obj -- ) or 0
 3 CONSTANT T-LINK       \ catalog link
 4 CONSTANT T-NFIELDS
 5 CONSTANT T-FIELDS     \ ptr to field table
-6 CONSTANT T-HEADER
+6 CONSTANT T-NAME       \ ptr to the copied type name
+7 CONSTANT T-NAMELEN
+8 CONSTANT T-HEADER
 
 \ field entry (cells): [ name-addr, name-len, offset, kind ]
 0 CONSTANT FT-NAME
@@ -36,87 +49,192 @@
 3 CONSTANT FT-KIND
 4 CONSTANT FT-SIZE
 
+\ store record (cells)
+0 CONSTANT S-OBJS        \ all-objects list head
+1 CONSTANT S-USED        \ bytes currently allocated
+2 CONSTANT S-LIMIT       \ GC threshold (bytes)
+3 CONSTANT S-ROOTS       \ linked list of root cell addresses
+4 CONSTANT S-TAB         \ address index base
+5 CONSTANT S-TABCAP
+6 CONSTANT S-TABN
+7 CONSTANT S-TABTOMB
+8 CONSTANT S-MKSTK       \ mark worklist
+9 CONSTANT S-MKSP
+10 CONSTANT S-MKCAP
+11 CONSTANT S-DATA       \ object arena
+12 CONSTANT S-CODE       \ executable (RWX) code arena
+13 CONSTANT S-META       \ table/worklist arena
+14 CONSTANT S-PARENT     \ ancestor store (0 for a root)
+15 CONSTANT S-CATALOG    \ type descriptor list
+16 CONSTANT S-CHILDREN   \ child-store list head (ownership, never GC-scanned)
+17 CONSTANT S-SIBLING    \ next sibling in the parent's list
+18 CONSTANT S-NCHILD     \ live child count (defer this store's GC while > 0)
+19 CONSTANT S-MASK       \ low bits cleared when marking (0 = plain pointers)
+20 CONSTANT S-BINDINGS   \ generic per-store object handle (e.g. a bindings table)
+21 CONSTANT S-SYMBOLS    \ generic per-store object handle (e.g. symbol intern list)
+22 CONSTANT S-SIZE
+
 : CELL+ ( a -- a' ) CELL-SIZE + ;
 : STR= { a1 u1 a2 u2 -- f } a1 u1 a2 u2 COMPARE 0= ;
 : ALLOC-TEXT { a u -- addr } u ALLOC TO addr  a addr u MOVE  addr ;
 
+\ store field access
+: S+ ( store off -- addr ) CELLS + ;
+: S@ ( store off -- x ) CELLS + @ ;
+: S! ( x store off -- ) CELLS + ! ;
+
 \ --------------------------------------------------------------------------
-\ store state
-VARIABLE OBJS       \ all-objects list head
-VARIABLE USED       \ bytes currently allocated on the GC heap
-VARIABLE LIMIT       \ GC threshold (bytes)
-VARIABLE CATALOG       \ type descriptor list
-VARIABLE ROOTS       \ linked list of root cell addresses
+\ store lifecycle
+\ STORE-MAKE ( parent limit -- store ): build a store, linking it into its
+\ parent's child registry.  The registry is ownership metadata held in plain
+\ (non-GC) records, so a parent->child edge is never scanned as a data
+\ pointer: the "reference up only" rule stays intact.
+: STORE-MAKE { parent limit -- store meta data }
+  S-SIZE CELLS MALLOC TO store
+  store 0= IF ARENA-OOM THROW THEN
+  ARENA-OPEN TO meta
+  ARENA-OPEN TO data
+  limit 0 <= IF 1 20 LSHIFT TO limit THEN
+  0     store S-OBJS S!
+  0     store S-USED S!
+  limit store S-LIMIT S!
+  0     store S-ROOTS S!
+  meta  store S-META S!
+  data  store S-DATA S!
+  data ARENA-VG-ON
+  0 ARENA-NEW-CODE store S-CODE S!
+  1024 CELLS meta ARENA-ALLOC store S-TAB S!
+  store S-TAB S@ 1024 CELLS 0 FILL
+  1024 store S-TABCAP S!
+  0    store S-TABN S!
+  0    store S-TABTOMB S!
+  256 CELLS meta ARENA-ALLOC store S-MKSTK S!
+  0    store S-MKSP S!
+  256  store S-MKCAP S!
+  parent  store S-PARENT S!
+  0       store S-CATALOG S!
+  0       store S-CHILDREN S!
+  0       store S-SIBLING S!
+  0       store S-NCHILD S!
+  0       store S-MASK S!
+  0       store S-BINDINGS S!
+  0       store S-SYMBOLS S!
+  parent IF
+    STORE-LOCK
+    parent S-CHILDREN S@ store S-SIBLING S!
+    store  parent S-CHILDREN S!
+    parent S-NCHILD S@ 1+ parent S-NCHILD S!
+    STORE-UNLOCK
+  THEN
+  store ;
 
-\ address index: open addressing; slot 0 = empty, 1 = tombstone, else object
-VARIABLE TAB
-VARIABLE TAB-CAP
-VARIABLE TAB-N
-VARIABLE TAB-TOMB
-VARIABLE OTAB
-VARIABLE OC
-VARIABLE XQ
+: STORE-NEW ( limit -- store ) 0 SWAP STORE-MAKE ;
+: STORE-CHILD ( parent limit -- store ) STORE-MAKE ;
 
-: TAB-SLOT ( i -- addr ) CELLS TAB @ + ;
-: TAB-HASH ( x -- i ) 3 RSHIFT 2654435761 * TAB-CAP @ 1- AND ;
-
-: TAB-PUT ( x -- )
-  DUP TAB-HASH
-  BEGIN DUP TAB-SLOT @ 1 > WHILE 1+ TAB-CAP @ 1- AND REPEAT
-  TAB-SLOT ! ;
-
-VARIABLE NEWCAP
-: TAB-GROW
-  TAB @ OTAB !  TAB-CAP @ OC !
-  OC @ 2 * DUP TAB-CAP ! NEWCAP !
-  NEWCAP @ CELLS ALLOC TAB !
-  TAB @ NEWCAP @ CELLS 0 FILL
-  0 TAB-TOMB !
-  OC @ 0 ?DO OTAB @ I CELLS + @ DUP 1 > IF TAB-PUT ELSE DROP THEN LOOP ;
-
-: TAB-INSERT ( x -- )
-  TAB-N @ TAB-TOMB @ + 4 * TAB-CAP @ 3 * >= IF TAB-GROW THEN
-  TAB-PUT  1 TAB-N +! ;
-
-: TAB-HAS? ( x -- f )
-  DUP XQ ! TAB-HASH
-  BEGIN
-    DUP TAB-SLOT @
-    DUP 0= IF 2DROP 0 EXIT THEN
-    DUP XQ @ = IF 2DROP -1 EXIT THEN
-    DROP 1+ TAB-CAP @ 1- AND
-  AGAIN ;
-
-: TAB-REMOVE ( x -- )
-  XQ ! XQ @ TAB-HASH
-  BEGIN
-    DUP TAB-SLOT @
-    DUP 0= IF 2DROP EXIT THEN
-    DUP XQ @ = IF
-      DROP 1 SWAP TAB-SLOT !
-      TAB-N @ 1- TAB-N !  TAB-TOMB @ 1+ TAB-TOMB !  EXIT
+: STORE-UNLINK { store -- parent prev cur nextsib }
+  store S-PARENT S@ TO parent
+  parent 0= IF EXIT THEN
+  STORE-LOCK
+  0 TO prev
+  parent S-CHILDREN S@ TO cur
+  BEGIN cur WHILE
+    cur store = IF
+      cur S-SIBLING S@ TO nextsib
+      prev IF nextsib prev S-SIBLING S! ELSE nextsib parent S-CHILDREN S! THEN
+      parent S-NCHILD S@ 1- parent S-NCHILD S!
+      0 TO cur                          \ remove: leave the loop
+    ELSE
+      cur TO prev
+      cur S-SIBLING S@ TO cur
     THEN
-    DROP 1+ TAB-CAP @ 1- AND
+  REPEAT
+  STORE-UNLOCK ;
+
+: STORE-FREE { store -- meta data code }
+  store STORE-UNLINK
+  store S-META S@ TO meta
+  store S-DATA S@ TO data
+  store S-CODE S@ TO code
+  meta ARENA-DESTROY
+  data ARENA-DESTROY
+  code ARENA-DESTROY
+  store FREE ;
+
+\ --------------------------------------------------------------------------
+\ address index: open addressing; slot 0 = empty, 1 = tombstone, else object
+\ hot-path field accesses are inlined (S@ / S! are colon words)
+: S-TAB-SLOT { store i -- addr } i CELLS store S-TAB CELLS + @ + ;
+: S-TAB-HASH { store x -- i }
+  x 3 RSHIFT
+  2654435761 *
+  DUP 32 RSHIFT XOR
+  DUP 16 RSHIFT XOR
+  store S-TABCAP CELLS + @ 1- AND ;
+
+: S-TAB-PUT { store x -- i }
+  store x S-TAB-HASH TO i
+  BEGIN
+    i CELLS store S-TAB CELLS + @ + @ 1 >
+  WHILE
+    i 1+ store S-TABCAP CELLS + @ 1- AND TO i
+  REPEAT
+  x i CELLS store S-TAB CELLS + @ + ! ;
+
+: S-TAB-GROW { store -- oldtab oldcap newcap newtab }
+  store S-TAB CELLS + @ TO oldtab
+  store S-TABCAP CELLS + @ TO oldcap
+  oldcap 2 * TO newcap
+  newcap CELLS store S-META CELLS + @ ARENA-ALLOC TO newtab
+  newtab newcap CELLS 0 FILL
+  oldtab oldcap newtab newcap (TAB-REHASH)
+  newtab store S-TAB CELLS + !
+  newcap store S-TABCAP CELLS + !
+  0 store S-TABTOMB CELLS + ! ;
+
+: S-TAB-INSERT { store x -- }
+  store S-TABN CELLS + @ store S-TABTOMB CELLS + @ + 4 * store S-TABCAP CELLS + @ 3 * >= IF store S-TAB-GROW THEN
+  store x S-TAB-PUT
+  1 store S-TABN CELLS + @ + store S-TABN CELLS + ! ;
+
+: S-TAB-HAS? { store x -- i }
+  store x S-TAB-HASH TO i
+  BEGIN
+    i CELLS store S-TAB CELLS + @ + @
+    DUP 0= IF DROP 0 EXIT THEN
+    DUP x = IF DROP -1 EXIT THEN
+    DROP
+    i 1+ store S-TABCAP CELLS + @ 1- AND TO i
   AGAIN ;
 
-: TAB-INIT 1024 CELLS ALLOC TAB ! 1024 TAB-CAP ! 0 TAB-N ! 0 TAB-TOMB ! ;
+: S-TAB-REMOVE { store x -- i }
+  store x S-TAB-HASH TO i
+  BEGIN
+    i CELLS store S-TAB CELLS + @ + @
+    DUP 0= IF DROP EXIT THEN
+    DUP x = IF
+      DROP
+      1 i CELLS store S-TAB CELLS + @ + !
+      store S-TABN CELLS + @ 1- store S-TABN CELLS + !
+      store S-TABTOMB CELLS + @ 1+ store S-TABTOMB CELLS + !
+      EXIT
+    THEN
+    DROP
+    i 1+ store S-TABCAP CELLS + @ 1- AND TO i
+  AGAIN ;
 
 \ --------------------------------------------------------------------------
 \ mark worklist (explicit, so marking never recurses on the return stack)
-VARIABLE MK-STK
-VARIABLE MK-SP
-VARIABLE MK-CAP
-VARIABLE MNEW
+: S-MK-GROW { store -- new capacity }
+  store S-MKCAP S@ 2 * 4 A-MAX TO capacity
+  capacity CELLS store S-META S@ ARENA-ALLOC TO new
+  store S-MKSTK S@ new store S-MKSP S@ CELLS MOVE
+  new store S-MKSTK S!
+  capacity store S-MKCAP S! ;
 
-: MK-GROW
-  MK-CAP @ 2 * 4 MAX DUP MK-CAP !
-  CELLS ALLOC MNEW !
-  MK-STK @ MNEW @ MK-SP @ CELLS MOVE
-  MNEW @ MK-STK ! ;
-: MK-PUSH ( x -- )
-  MK-SP @ MK-CAP @ >= IF MK-GROW THEN
-  MK-STK @ MK-SP @ CELLS + !  1 MK-SP +! ;
-: MK-INIT  256 CELLS ALLOC MK-STK ! 0 MK-SP ! 256 MK-CAP ! ;
+: S-MK-PUSH { store x -- }
+  store S-MKSP S@ store S-MKCAP S@ >= IF store S-MK-GROW THEN
+  x store S-MKSTK S@ store S-MKSP S@ CELLS + !
+  store S-MKSP S@ 1+ store S-MKSP S! ;
 
 \ --------------------------------------------------------------------------
 : FIELD-ADDR ( obj i -- addr ) CELLS SWAP H-PAYLOAD CELLS + + ;
@@ -124,84 +242,95 @@ VARIABLE MNEW
 : FIELD! ( x obj i -- ) FIELD-ADDR ! ;
 : TYPEOF ( obj -- type ) H-TYPE CELLS + @ ;
 
-: MARK-CELL ( x -- )
-  ?DUP IF
-    DUP TAB-HAS? IF
-      DUP H-MARK CELLS + @ 0= IF
-        DUP H-MARK CELLS + 1 SWAP !
-        MK-PUSH
-      ELSE DROP THEN
-    ELSE DROP THEN
+: S-MARK-CELL { store x -- m }
+  x store S-MASK S@ INVERT AND TO m
+  m 0= IF EXIT THEN
+  store m S-TAB-HAS? IF
+    m H-MARK CELLS + @ 0= IF
+      m H-MARK CELLS + 1 SWAP !
+      store m S-MK-PUSH
+    THEN
   THEN ;
 
-VARIABLE MO
-VARIABLE MF
-VARIABLE MT
-: MARK-OBJ ( obj -- )
-  DUP H-TYPE CELLS + @ MT !
-  MT @ T-TRACE CELLS + @ ?DUP IF EXECUTE ELSE
-    MO !
-    MT @ T-FIELDS CELLS + @ MF !
-    MT @ T-NFIELDS CELLS + @ 0 ?DO
-      MF @ I FT-SIZE * CELLS + FT-KIND CELLS + @ K-POINTER = IF
-        MO @ MF @ I FT-SIZE * CELLS + FT-OFF CELLS + @ FIELD-ADDR @ MARK-CELL
-      THEN
-    LOOP
-  THEN ;
+: S-MARK-OBJ { obj store -- type trace fields }
+  obj H-TYPE CELLS + @ TO type
+  type T-TRACE CELLS + @ TO trace
+  trace IF obj store trace EXECUTE EXIT THEN
+  type T-FIELDS CELLS + @ TO fields
+  type T-NFIELDS CELLS + @ 0 ?DO
+    fields I FT-SIZE * CELLS + FT-KIND CELLS + @ K-POINTER = IF
+      store obj fields I FT-SIZE * CELLS + FT-OFF CELLS + @ FIELD-ADDR @ S-MARK-CELL
+    THEN
+  LOOP ;
 
 \ --------------------------------------------------------------------------
 \ roots
-: MARK-SPAN { base n -- } n 0 ?DO base I CELLS + @ MARK-CELL LOOP ;
-: MARK-RANGE { top n -- } top CELLS + n CELLS - n MARK-SPAN ;
+: S-MARK-SPAN { base n store -- } n 0 ?DO store base I CELLS + @ S-MARK-CELL LOOP ;
+: S-MARK-RANGE { top n store -- } top CELLS + n CELLS - n store S-MARK-SPAN ;
 
-: MARK-ROOTS
-  DSTACK MARK-SPAN              \ data stack
-  LOCALS MARK-SPAN              \ live locals frame
-  RSTACK MARK-SPAN              \ return stack
-  ROOTS @
-  BEGIN DUP WHILE
-    DUP @ @ MARK-CELL          \ value held in the registered slot
-    1 CELLS + @
-  REPEAT DROP ;
+VARIABLE RANGES
 
-: ROOT ( addr -- )              \ register a global cell as a root
-  2 CELLS ALLOC
-  OVER OVER !
-  ROOTS @ OVER 1 CELLS + !
-  ROOTS ! ;
+: S-MARK-ROOTS { store -- cur r }
+  DSTACK store S-MARK-SPAN
+  LOCALS store S-MARK-SPAN
+  RSTACK store S-MARK-SPAN
+  store S-ROOTS S@ TO cur
+  BEGIN cur WHILE
+    store cur @ @ S-MARK-CELL          \ node[0] = root cell address
+    cur CELL-SIZE + @ TO cur
+  REPEAT
+  RANGES @ TO r
+  BEGIN r WHILE
+    r @ r CELL-SIZE + @ @ store S-MARK-SPAN    \ ( base count store )
+    r 2 CELLS + @ TO r
+  REPEAT ;
 
-: UNROOT { addr -- prev cur }
+: S-ROOT { addr store -- node }
+  2 CELLS ALLOC TO node
+  addr node !
+  store S-ROOTS S@ node CELL-SIZE + !
+  node store S-ROOTS S! ;
+
+\ register a cell range [base, base+count@) as roots (for evaluator stacks)
+: S-ROOT-RANGE { base countaddr store -- node }
+  3 CELLS ALLOC TO node
+  base      node !
+  countaddr node CELL-SIZE + !
+  RANGES @  node 2 CELLS + !
+  node RANGES ! ;
+
+: S-UNROOT { addr store -- prev cur }
   0 TO prev
-  ROOTS @ TO cur
+  store S-ROOTS S@ TO cur
   BEGIN cur WHILE
     cur @ addr = IF
-      prev IF prev 1 CELLS + cur 1 CELLS + @ ! ELSE cur 1 CELLS + @ ROOTS ! THEN
+      prev IF prev CELL-SIZE + cur CELL-SIZE + @ ! ELSE cur CELL-SIZE + @ store S-ROOTS S! THEN
       EXIT
     THEN
     cur TO prev
-    cur 1 CELLS + @ TO cur
+    cur CELL-SIZE + @ TO cur
   REPEAT ;
 
-: DRAIN
-  BEGIN MK-SP @ 0> WHILE
-    MK-SP @ 1- MK-SP !
-    MK-STK @ MK-SP @ CELLS + @ MARK-OBJ
+: S-DRAIN { store -- }
+  BEGIN store S-MKSP S@ 0> WHILE
+    store S-MKSP S@ 1- store S-MKSP S!
+    store S-MKSTK S@ store S-MKSP S@ CELLS + @ store S-MARK-OBJ
   REPEAT ;
 
-: FREEOBJ ( obj -- )
-  DUP TAB-REMOVE
-  DUP H-SIZE CELLS + @ H-PAYLOAD + CELLS
-  USED @ SWAP - USED !
-  FREE ;
+: S-FREEOBJ { obj store -- }
+  store obj S-TAB-REMOVE
+  obj H-SIZE CELLS + @ H-PAYLOAD + CELLS
+  store S-USED S@ SWAP - store S-USED S!
+  obj store S-DATA S@ ARENA-FREE ;
 
-: SWEEP { -- prev cur next }
+: S-SWEEP { store -- prev cur next }
   0 TO prev
-  OBJS @ TO cur
+  store S-OBJS S@ TO cur
   BEGIN cur WHILE
     cur H-NEXT CELLS + @ TO next
     cur H-MARK CELLS + @ 0= IF
-      prev IF prev H-NEXT CELLS + next ! ELSE next OBJS ! THEN
-      cur FREEOBJ
+      prev IF next prev H-NEXT CELLS + ! ELSE next store S-OBJS S! THEN
+      cur store S-FREEOBJ
     ELSE
       0 cur H-MARK CELLS + !
       cur TO prev
@@ -209,38 +338,82 @@ VARIABLE MT
     next TO cur
   REPEAT ;
 
-: GC  0 MK-SP ! MARK-ROOTS DRAIN SWEEP ;
+\ integrity check (live list/table + free list); enabled by DBG-VERIFY
+VARIABLE DBG-VERIFY
+: S-VERIFY { store -- n i o chunk arena }
+  0 TO i
+  store S-OBJS S@ TO o
+  BEGIN o WHILE
+    store o S-TAB-HAS? 0= IF -1 THROW THEN
+    o H-MARK CELLS + @ 0 <> IF -1 THROW THEN
+    i 1+ TO i
+    i store S-TABN S@ > IF -1 THROW THEN
+    o H-NEXT CELLS + @ TO o
+  REPEAT
+  i store S-TABN S@ <> IF -1 THROW THEN
+  store S-DATA S@ TO arena
+  arena A-FREE CELLS + @ TO chunk
+  BEGIN chunk WHILE
+    chunk 7 AND 0 <> IF -1 THROW THEN
+    chunk @ 7 AND 0 <> IF -1 THROW THEN
+    chunk @ 0 <= IF -1 THROW THEN
+    chunk CELL-SIZE + @ TO chunk
+  REPEAT
+  i ;
+
+\ A store with live children is kept all-live: its objects may be referenced
+\ from any descendant, and there is no downward tracing, so collection is
+\ deferred until the last child goes away.  Leaf stores collect normally.
+: S-GC { store -- }
+  store S-NCHILD S@ 0> IF EXIT THEN
+  0 store S-MKSP S! store S-MARK-ROOTS store S-DRAIN store S-SWEEP
+  DBG-VERIFY @ IF store S-VERIFY DROP THEN ;
 
 \ --------------------------------------------------------------------------
 \ allocation
-: NEW { type -- obj }
-  USED @ LIMIT @ > IF GC THEN
-  type T-SIZE CELLS + @ H-PAYLOAD + CELLS MALLOC TO obj
-  obj 0= IF -1 THROW THEN
-  OBJS @ obj H-NEXT CELLS + !
-  obj OBJS !
+\ S-NEW-N allocates an object with an explicit payload size (cells), so it
+\ also backs variable-length arrays.  S-NEW is the fixed-size case.
+: S-NEW-N { type ncells store -- obj }
+  type ncells store (OBJ-FAST-N) ?DUP IF EXIT THEN
+  store S-USED CELLS + @ store S-LIMIT CELLS + @ > IF store S-GC THEN
+  ncells H-PAYLOAD + CELLS store S-DATA CELLS + @ ARENA-ALLOC TO obj
+  obj 0= IF ARENA-OOM THROW THEN
+  store S-OBJS CELLS + @ obj H-NEXT CELLS + !
+  obj store S-OBJS CELLS + !
   type obj H-TYPE CELLS + !
-  type T-SIZE CELLS + @ obj H-SIZE CELLS + !
+  ncells obj H-SIZE CELLS + !
   0 obj H-MARK CELLS + !
-  obj TAB-INSERT
-  H-PAYLOAD type T-SIZE CELLS + @ + CELLS USED +!
+  store obj S-TAB-INSERT
+  ncells H-PAYLOAD + CELLS store S-USED CELLS + @ + store S-USED CELLS + !
   obj ;
+
+: S-NEW { type store -- obj } type type T-SIZE CELLS + @ store S-NEW-N ;
 
 \ --------------------------------------------------------------------------
 \ type definition
+\ NEWTYPE takes the target store; its descriptor is linked into that store's
+\ catalog.  ;TYPE is idempotent: if a same-named type already exists in the
+\ store or an ancestor, the freshly created word is aliased to it instead of
+\ adding a duplicate descriptor.
+VARIABLE NT-STORE
+VARIABLE NT-WORD
 VARIABLE NT-BODY
 VARIABLE NT-TRACE
 VARIABLE NT-PRINT
 VARIABLE NT-NF
 VARIABLE NT-FIELDS
 VARIABLE NT-CAP
+VARIABLE NT-NAME-ADDR
+VARIABLE NT-NAME-LEN
 VARIABLE F-KIND
 VARIABLE F-ADDR
 VARIABLE F-LEN
 VARIABLE F-BASE
 
-: NEWTYPE ( "name" -- )
+: NEWTYPE ( store "name" -- )
+  NT-STORE !
   CREATE 0 ,
+  LATEST NT-WORD !
   LATEST >BODY NT-BODY !
   0 NT-TRACE ! 0 NT-PRINT !
   0 NT-NF !
@@ -262,18 +435,37 @@ VARIABLE F-BASE
 : TRACE: ( "name" -- ) ' NT-TRACE ! ;
 : PRINT: ( "name" -- ) ' NT-PRINT ! ;
 
-: ;TYPE
-  T-HEADER CELLS ALLOC >R
-  NT-NF @ R@ T-SIZE CELLS + !
-  NT-TRACE @ R@ T-TRACE CELLS + !
-  NT-PRINT @ R@ T-PRINT CELLS + !
-  NT-NF @ R@ T-NFIELDS CELLS + !
+: CATALOG-FIND { addr u cat -- type }
+  BEGIN cat WHILE
+    cat T-NAMELEN CELLS + @ u = IF
+      cat T-NAME CELLS + @ cat T-NAMELEN CELLS + @ addr u STR= IF cat EXIT THEN
+    THEN
+    cat T-LINK CELLS + @ TO cat
+  REPEAT 0 ;
+
+: FIND-TYPE-CHAIN { addr u store -- type }
+  BEGIN store WHILE
+    addr u store S-CATALOG S@ CATALOG-FIND ?DUP IF EXIT THEN
+    store S-PARENT S@ TO store
+  REPEAT 0 ;
+
+: ;TYPE { -- d }
+  NT-WORD @ WORD-NAME NT-NAME-LEN ! NT-NAME-ADDR !
+  NT-NAME-ADDR @ NT-NAME-LEN @ NT-STORE @ FIND-TYPE-CHAIN
+  ?DUP IF NT-BODY @ ! EXIT THEN
+  T-HEADER CELLS ALLOC TO d
+  NT-NAME-ADDR @ NT-NAME-LEN @ ALLOC-TEXT d T-NAME CELLS + !
+  NT-NAME-LEN @ d T-NAMELEN CELLS + !
+  NT-NF @ d T-SIZE CELLS + !
+  NT-TRACE @ d T-TRACE CELLS + !
+  NT-PRINT @ d T-PRINT CELLS + !
+  NT-NF @ d T-NFIELDS CELLS + !
   NT-NF @ FT-SIZE * CELLS ALLOC
-  DUP R@ T-FIELDS CELLS + !
+  DUP d T-FIELDS CELLS + !
   NT-FIELDS @ SWAP  NT-NF @ FT-SIZE * CELLS  MOVE
-  CATALOG @ R@ T-LINK CELLS + !
-  R@ CATALOG !
-  R> NT-BODY @ ! ;
+  NT-STORE @ S-CATALOG S@ d T-LINK CELLS + !
+  d NT-STORE @ S-CATALOG S!
+  d NT-BODY @ ! ;
 
 \ named field lookup / access
 VARIABLE FE
@@ -296,18 +488,125 @@ VARIABLE FE
   x SWAP obj SWAP FIELD! ;
 
 \ --------------------------------------------------------------------------
-: OBJECTS-INIT
-  TAB-INIT MK-INIT
-  LIMIT @ 0= IF 1 20 LSHIFT LIMIT ! THEN ;
+: OBJECTS-LIVE { store -- n } store S-TABN S@ ;
 
-: OBJECTS-STATS
-  ." objects=" TAB-N @ .
-  ." bytes=" USED @ .
-  ." table=" TAB-CAP @ . CR ;
+: OBJECTS-STATS { store -- }
+  ." objects=" store S-TABN S@ .
+  ." bytes=" store S-USED S@ .
+  ." table=" store S-TABCAP S@ . CR ;
 
-\ free every live object (call before exit, or leave to libc at process end)
-: OBJECTS-FREE
-  OBJS @ BEGIN DUP WHILE DUP H-NEXT CELLS + @ SWAP FREE REPEAT DROP
-  0 OBJS !  0 TAB-N !  0 TAB-TOMB !  0 USED ! ;
+\ discard every object and reset the store to empty
+: OBJECTS-FREE { store -- }
+  store S-DATA S@ ARENA-RESET
+  store S-CODE S@ ARENA-RESET
+  0 store S-OBJS S!
+  0 store S-TABN S!
+  0 store S-TABTOMB S!
+  0 store S-USED S!
+  store S-TAB S@ store S-TABCAP S@ CELLS 0 FILL ;
 
-OBJECTS-INIT
+\ integrity check (after GC): every live object is indexed, marks clear, the
+\ list has no cycle and its length equals TABN.  Throws on any inconsistency.
+: OBJECTS-VERIFY { store -- n i o }
+  0 TO i
+  store S-OBJS S@ TO o
+  BEGIN o WHILE
+    store o S-TAB-HAS? 0= IF -1 THROW THEN
+    o H-MARK CELLS + @ 0 <> IF -1 THROW THEN
+    i 1+ TO i
+    i store S-TABN S@ > IF -1 THROW THEN
+    o H-NEXT CELLS + @ TO o
+  REPEAT
+  i store S-TABN S@ <> IF -1 THROW THEN
+  i ;
+
+\ free-list integrity: every chunk is 8-aligned with a positive size.
+: ARENA-VERIFY { arena -- n i chunk }
+  0 TO i
+  arena A-FREE CELLS + @ TO chunk
+  BEGIN chunk WHILE
+    chunk 7 AND 0 <> IF -1 THROW THEN
+    chunk @ 0 <= IF -1 THROW THEN
+    chunk @ 7 AND 0 <> IF -1 THROW THEN
+    i 1+ TO i
+    chunk CELL-SIZE + @ TO chunk
+  REPEAT
+  i ;
+
+\ public names (store is the last argument)
+: NEW ( type store -- obj ) S-NEW ;
+: GC ( store -- ) S-GC ;
+: ROOT ( addr store -- ) S-ROOT ;
+: UNROOT ( addr store -- ) S-UNROOT ;
+: ROOT-RANGE ( base countaddr store -- ) S-ROOT-RANGE ;
+: STORE-PARENT ( store -- parent ) S-PARENT S@ ;
+: STORE-NCHILDREN ( store -- n ) S-NCHILD S@ ;
+: STORE-MASK ( store -- m ) S-MASK S@ ;
+: STORE-MASK! ( m store -- ) S-MASK S! ;
+: STORE-BINDINGS ( store -- x ) S-BINDINGS S@ ;
+: STORE-BINDINGS! ( x store -- ) S-BINDINGS S! ;
+: STORE-SYMBOLS ( store -- x ) S-SYMBOLS S@ ;
+: STORE-SYMBOLS! ( x store -- ) S-SYMBOLS S! ;
+: MARK ( store x -- ) S-MARK-CELL ;
+: META-ALLOC ( u store -- addr ) S-META S@ ARENA-ALLOC ;
+
+\ the system store: root of every store chain, created once at load time
+VARIABLE SYS-STORE
+1 20 LSHIFT STORE-NEW SYS-STORE !
+: SYSTEM ( -- store ) SYS-STORE @ ;
+
+\ --------------------------------------------------------------------------
+\ per-task stores
+\ Each spawned task attaches its own child of SYSTEM (shared-nothing mutable
+\ heap) and releases it when the body finishes.  TASK-STORE is the store to
+\ use from within a task; the root context's store is SYSTEM itself.
+: (TASK-ENTER)  SYSTEM 0 STORE-CHILD (SET-STORE) ;
+: (TASK-LEAVE)  (GET-STORE) ?DUP IF STORE-FREE THEN  0 (SET-STORE) ;
+: TASK-STORE ( -- store ) (GET-STORE) ;
+
+' (TASK-ENTER) ' (TASK-LEAVE) (TASK-HOOKS)
+SYSTEM (SET-STORE)
+
+\ --------------------------------------------------------------------------
+\ code objects
+\ A CODE-OBJ holds an executable code blob copied into the store's RWX code
+\ arena; it is freed with the store.  NEW-CODE copies `from`/`u` and returns
+\ the object; the source (e.g. a sljit block) can then be released.  The
+\ `addr` field is a scalar (not a heap pointer), so GC never traces it.
+SYSTEM NEWTYPE CODE-OBJ
+  0 FIELD addr
+  0 FIELD size
+;TYPE
+
+: NEW-CODE { from u store -- codeobj dst }
+  u store S-CODE S@ ARENA-ALLOC TO dst
+  from dst u MOVE
+  CODE-OBJ store NEW TO codeobj
+  dst codeobj 0 FIELD!
+  u   codeobj 1 FIELD!
+  codeobj ;
+
+: CODE-PTR { codeobj -- addr } codeobj 0 FIELD@ ;
+: CODE-SIZE { codeobj -- u } codeobj 1 FIELD@ ;
+
+\ --------------------------------------------------------------------------
+\ arrays: variable-length, GC-traced base elements of the store.
+\ An array's payload is H-SIZE generic cells.  Marking is conservative: every
+\ cell is scanned and only values that are objects of this store are marked,
+\ so numbers / null are ignored.  That never misses a live reference (sound);
+\ at worst a number aliasing an object address retains that object.
+: TRACE-ALL { obj store -- n i }
+  obj H-SIZE CELLS + @ TO n
+  n 0 ?DO store obj H-PAYLOAD CELLS + I CELLS + @ S-MARK-CELL LOOP ;
+
+SYSTEM NEWTYPE ARRAY
+  TRACE: TRACE-ALL
+;TYPE
+
+: ARRAY-NEW { ncells store -- arr }
+  ARRAY ncells store S-NEW-N TO arr
+  arr H-PAYLOAD CELLS + ncells CELLS 0 FILL
+  arr ;
+: ARRAY-LEN { arr -- n } arr H-SIZE CELLS + @ ;
+: ARRAY@ { arr i -- x } arr H-PAYLOAD CELLS + i CELLS + @ ;
+: ARRAY! { x arr i -- } x arr H-PAYLOAD CELLS + i CELLS + ! ;

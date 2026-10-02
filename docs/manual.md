@@ -1224,3 +1224,26 @@ Roots are scanned by the collector:
 `GC` performs mark + sweep; `NEW` triggers it when `USED` exceeds `LIMIT`.
 `OBJECTS-FREE` releases every live object; `OBJECTS-STATS` prints usage. The
 collector is non-moving, so addresses stay valid.
+
+---
+
+## 33. JIT-ing Scheme (`lib/scheme-jit.fs`)
+
+`lib/scheme-jit.fs` compiles a small Scheme expression to native code, proving
+the AST → IR → SLJIT → call pipeline. It supports one fixnum parameter `x`,
+fixnum literals and `(+ - *)` with nesting.
+
+- `PARSE1 ( c-addr u -- expr )` reads one expression using the Scheme reader.
+- `JIT1 ( expr -- ... )` emits IR into a buffer and returns the native word
+  (via `ASSEMBLE-FORTH`, which uses the Forth register ABI). The
+  compiled-function record is an object in `lib/objects.fs`.
+- `JIT-RUN1 ( x expr -- y )` compiles and runs.
+
+```
+REQUIRE scheme-jit.fs
+5 >FIX S" (+ (* x 2) 3)" PARSE1 JIT-RUN1 FIX> .   \ 13
+```
+
+`ASSEMBLE-FORTH ( c-addr u -- code )` and `CALLF1 ( x ptr -- y )` are the new
+kernel words (with `ASSEMBLE`/`CALL1` for the raw C ABI). Environments,
+closures, `if`/`let`, lists and tail calls are not covered yet.

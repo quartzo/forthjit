@@ -1200,7 +1200,21 @@ static void ir_instruction(struct forth *F, const char *m) {
 }
 
 /* ---- assemble current irbuf into machine code ------------------------- */
-void *ir_compile(struct forth *F, int abi, int local) {
+/* keep process-lifetime generated code (boot/session) so it can be freed at
+   shutdown; dynamic code is copied into a store code arena instead */
+void ir_track_code(void *code) {
+    if (!code) return;
+    if (g_ir.njit == g_ir.jit_cap) {
+        int cap = g_ir.jit_cap ? g_ir.jit_cap * 2 : 256;
+        void **p = realloc(g_ir.jit_codes, (size_t)cap * sizeof *p);
+        if (!p) return;                 /* drop tracking rather than crash */
+        g_ir.jit_codes = p;
+        g_ir.jit_cap = cap;
+    }
+    g_ir.jit_codes[g_ir.njit++] = code;
+}
+
+void *ir_compile(struct forth *F, int abi, int local, int keep) {
     g_ir.jcomp = sljit_create_compiler(NULL);
     if (!g_ir.jcomp) throw_error(F, "cannot create jit compiler");
     g_ir.forth_abi = abi;
@@ -1265,6 +1279,6 @@ void *ir_compile(struct forth *F, int abi, int local) {
     g_ir.n_pend_jumps = g_ir.n_pend_consts = 0;
     sljit_free_compiler(g_ir.jcomp);
     g_ir.jcomp = NULL;
-    if (g_ir.njit < MAX_JIT) g_ir.jit_codes[g_ir.njit++] = code;
+    if (keep) ir_track_code(code);
     return code;
 }
