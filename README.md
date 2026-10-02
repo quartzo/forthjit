@@ -103,6 +103,7 @@ process.
 | `forth.h` | shared types (`struct forth`, `Word`, `Region`, …) and the interfaces between `forth.c` and `code.c` |
 | `prelude.fs` | native prelude: stack, arithmetic, strings, memory, compiler kit, control flow |
 | `lib/vm.fs` | generic bytecode VM: explicit state, `EXECUTE` dispatch, `call/cc`, coroutines |
+| `lib/objects.fs` | dynamic object store with a mark-and-sweep GC (malloc'd, non-moving) |
 | `lib/scheme.fs` | minimal Scheme on the runtime, with a `SCHEME` REPL |
 | `bin/scheme` | launcher for the Scheme REPL |
 | `tools/mkprelude.c` | build tool: compresses `prelude.fs` into `prelude_blob.h` |
@@ -976,6 +977,35 @@ Limitations (the current step is deliberately minimal):
 
 Build targets: `make test` (includes `test-threads.fs`), `make asan`,
 `make tsan` (clean).
+
+## Object store and GC (`lib/objects.fs`)
+
+A small dynamic object system with a precise mark-and-sweep collector, written
+in Forth:
+
+```
+REQUIRE objects.fs
+NEWTYPE NODE
+  1 FIELD next        \ 1 = pointer field (traced by the GC)
+  0 FIELD val         \ 0 = scalar
+;TYPE
+
+VARIABLE HEAD  HEAD ROOT     \ register a global slot as a GC root
+
+: ADD { n -- obj } NODE NEW TO obj  n obj 1 FIELD!  HEAD @ obj 0 FIELD!  obj HEAD ! ;
+: BUILD 100 0 DO I ADD LOOP ;
+
+BUILD   GC
+```
+
+- Objects are `MALLOC`'d individually (stable, non-moving addresses) and
+  linked into one list; a hash index gives O(1) pointer validation.
+- A type is a descriptor with a positional callback vector (`T-TRACE`,
+  `T-PRINT`, …) and a field table; fields declare `kind` (scalar/pointer) so
+  marking is **precise** by default, with a custom `TRACE:` callback available.
+- Roots are the data stack, the locals frame, the return stack
+  (`DSTACK`/`LOCALS`/`RSTACK` kernel accessors) and slots registered with
+  `ROOT`. `GC` marks then sweeps; `OBJECTS-FREE` releases the heap.
 
 ## Minimal Scheme (`lib/scheme.fs`)
 

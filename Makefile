@@ -43,6 +43,7 @@ test: $(TARGET)
 	./$(TARGET) test-native.fs </dev/null
 	./$(TARGET) test-lib.fs </dev/null
 	./$(TARGET) test-scheme.fs </dev/null
+	./$(TARGET) test-objects.fs </dev/null
 	FORTH_WORKERS=4 ./$(TARGET) test-threads.fs </dev/null
 	@printf '(+ 1 2)\n' | ./$(TARGET) --require scheme.fs --repl SCHEME >/dev/null
 

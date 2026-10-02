@@ -1190,3 +1190,37 @@ Example:
   >R SWAP DROP R> + ;
 20 FIB . CR
 ```
+
+---
+
+## 32. Object store and garbage collection
+
+`lib/objects.fs` (loaded with `REQUIRE objects.fs`) is a dynamic object system
+with a mark-and-sweep collector, written in Forth. Objects are `MALLOC`'d
+individually (stable, non-moving addresses) and linked into one list; a hash
+index validates object pointers in O(1).
+
+Types are defined at runtime:
+
+```
+NEWTYPE NODE
+  1 FIELD next        \ kind 1 = pointer (traced), 0 = scalar
+  0 FIELD val
+;TYPE
+```
+
+A type is a descriptor with a positional callback vector — `T-TRACE`,
+`T-PRINT` (set with `TRACE:` / `PRINT:`) — and a field table. Marking is
+precise by default: only fields declared as pointers are traced; a type may
+instead give a custom `TRACE:` word. Instances are made with `NEW ( type -- obj )`,
+fields read/written by index (`FIELD@`/`FIELD!`) or name (`@FIELD`/`!FIELD`).
+
+Roots are scanned by the collector:
+- the data stack, the live locals frame and the return stack — exposed to
+  Forth by the kernel accessors `DSTACK ( -- base n )`, `LOCALS ( -- base n )`
+  and `RSTACK ( -- base n )` (`RDEPTH` gives the return depth);
+- any global cell registered with `ROOT ( addr -- )` / `UNROOT`.
+
+`GC` performs mark + sweep; `NEW` triggers it when `USED` exceeds `LIMIT`.
+`OBJECTS-FREE` releases every live object; `OBJECTS-STATS` prints usage. The
+collector is non-moving, so addresses stay valid.

@@ -559,6 +559,13 @@ static void p_arena_reset(struct forth *F) {
     mem_unlock();
 }
 
+/* GC root accessors: the live locals frame and the return-stack depth, so a
+   collector written in Forth can scan every place that can hold a reference. */
+static void p_locals_range(struct forth *F) { int n = F->lfree; push(F, (cell)(intptr_t)F->locals); push(F, n); }
+static void p_dstack_range(struct forth *F) { int n = F->sp; push(F, (cell)(intptr_t)F->dstack); push(F, n); }
+static void p_rstack_range(struct forth *F) { int n = F->rp; push(F, (cell)(intptr_t)F->rstack); push(F, n); }
+static void p_rdepth(struct forth *F) { push(F, F->rp); }
+
 /* read one line from stdin: ( -- c-addr u ); u = 0 at EOF */
 static void p_read_line(struct forth *F) {
     if (!fgets(F->rline, sizeof F->rline, stdin)) { push(F, 0); push(F, 0); return; }
@@ -2010,6 +2017,10 @@ static void init_dict(struct forth *F) {
     define_prim(F, "FREE", p_free);
     define_prim(F, "ALLOC", p_alloc);
     define_prim(F, "ARENA-RESET", p_arena_reset);
+    define_prim(F, "LOCALS", p_locals_range);
+    define_prim(F, "DSTACK", p_dstack_range);
+    define_prim(F, "RSTACK", p_rstack_range);
+    define_prim(F, "RDEPTH", p_rdepth);
     define_prim(F, "READ-LINE", p_read_line);
 
     /* floating point */
