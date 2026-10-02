@@ -34,8 +34,8 @@ $(SLJIT_OBJ): $(SLJIT_DIR)/sljitLir.c
 $(TINF_OBJ): $(TINF_DIR)/tinflate.c $(TINF_DIR)/tinf.h
 	$(CC) -Os -DNDEBUG -w -I$(TINF_DIR) -c $< -o $@
 
-$(TARGET): forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) $(CFLAGS) $(SHRINK) $(CPPFLAGS) $(LDFLAGS) -o $@ forth.c \
+$(TARGET): forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
+	$(CC) $(CFLAGS) $(SHRINK) $(CPPFLAGS) $(LDFLAGS) -o $@ forth.c code.c \
 	      $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread -Wl,-s
 
 test: $(TARGET)
@@ -46,11 +46,11 @@ test: $(TARGET)
 	FORTH_WORKERS=4 ./$(TARGET) test-threads.fs </dev/null
 	@printf '(+ 1 2)\n' | ./$(TARGET) --require scheme.fs --repl SCHEME >/dev/null
 
-asan: forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
+asan: forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=address,undefined -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
 
-tsan: forth.c $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
-	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=thread -o $(TARGET) forth.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
+tsan: forth.c code.c forth.h $(SLJIT_OBJ) $(TINF_OBJ) $(PRELUDE_HDR)
+	$(CC) -std=c11 -g -O1 -Wall -Wextra $(CPPFLAGS) -fsanitize=thread -o $(TARGET) forth.c code.c $(SLJIT_OBJ) $(TINF_OBJ) -ldl -lm -lpthread
 
 clean:
 	rm -f $(TARGET) $(SLJIT_OBJ) $(TINF_OBJ) $(MKPRELUDE) $(PRELUDE_HDR)

@@ -98,7 +98,9 @@ process.
 
 | Path | Contents |
 |------|----------|
-| `forth.c` | C kernel: parser, dictionary, VM primitives, `CODE`/IR assembler, JIT, dynamic linker |
+| `forth.c` | C kernel: parser, dictionary, VM primitives, JIT, tasks, dynamic linker |
+| `code.c` | `CODE ... ;CODE` parser and SLJIT IR assembler (the `&symbol`/`locals`/labels machinery) |
+| `forth.h` | shared types (`struct forth`, `Word`, `Region`, …) and the interfaces between `forth.c` and `code.c` |
 | `prelude.fs` | native prelude: stack, arithmetic, strings, memory, compiler kit, control flow |
 | `lib/vm.fs` | generic bytecode VM: explicit state, `EXECUTE` dispatch, `call/cc`, coroutines |
 | `lib/scheme.fs` | minimal Scheme on the runtime, with a `SCHEME` REPL |
